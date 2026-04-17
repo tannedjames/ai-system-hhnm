@@ -33,19 +33,23 @@ graph TB
     end
 
     subgraph Data["🗄️ Data layer"]
-        QD[("🔍 Qdrant\nVector store")]
-        RD[("⚡ Redis\nBroker + Cache")]
         PG[("🐘 PostgreSQL\nUsers · Docs · Metadata")]
+        MN[("🪣 MinIO\nFile gốc · Snapshot tài liệu")]
+        QD[("🔍 Qdrant\nVector embeddings")]
+        RD[("⚡ Redis\nBroker + Cache")]
     end
 
     FU -- "REST / WebSocket" --> BE
     FA -- "REST" --> BE
-    BE -- "Celery task dispatch" --> RD
+    BE -- "Lưu metadata" --> PG
+    BE -- "Upload file gốc" --> MN
+    BE -- "Dispatch task" --> RD
     RD --> CW
+    CW -- "Tải file từ storage" --> MN
     CW -- "Upsert vectors" --> QD
-    CW -- "Lưu metadata" --> PG
-    BE -- "Retrieve vectors" --> QD
-    BE -- "Read/Write" --> PG
+    CW -- "Cập nhật trạng thái" --> PG
+    BE -- "Similarity search" --> QD
+    BE -- "Read/Write session" --> RD
 ```
 
 ---
@@ -104,6 +108,65 @@ Xử lý bất đồng bộ việc đưa tài liệu vào kho tri thức.
 | 📥 Ingest tài liệu | `chunking → embedding → upsert vào Qdrant` |
 | 🔁 Tái ingest | Tự động cập nhật khi tài liệu thay đổi |
 | 🔃 Retry logic | Tự động thử lại khi tác vụ thất bại |
+
+---
+
+## Chiến lược lưu trữ
+
+Hệ thống sử dụng **ba loại lưu trữ chuyên biệt**, mỗi loại phục vụ một mục đích riêng biệt trong pipeline:
+
+```mermaid
+graph LR
+    DOC["📄 Tài liệu\ntải lên"] --> MN
+    MN["🪣 Object Storage\nMinIO"] -->|"Tải file gốc\nkhi ingest"| CW["🔄 Celery Worker"]
+    CW -->|"Lưu vector\nembeddings"| QD["🔍 Vector DB\nQdrant"]
+    CW -->|"Cập nhật\ntrạng thái"| PG["🐘 Relational DB\nPostgreSQL"]
+    PG -->|"Trích dẫn\nnguồn"| BE["🚀 Backend API"]
+    QD -->|"Semantic\nsearch"| BE
+    MN -->|"Tải lại file\nkhi cần"| BE
+```
+
+### 1. 🐘 Relational Database — PostgreSQL
+
+Lưu trữ toàn bộ **dữ liệu có cấu trúc** của hệ thống.
+
+| Bảng | Dữ liệu lưu trữ |
+|---|---|
+| `users` | Tài khoản, mật khẩu hash, role (`admin / user`), thời gian tạo |
+| `documents` | Tên file, loại, đường dẫn MinIO, trạng thái ingest, phiên bản |
+| `document_chunks` | Mapping chunk ↔ document (chunk_id, vị trí, trang) |
+| `conversations` | Lịch sử hội thoại, user_id, timestamp |
+| `messages` | Nội dung tin nhắn, role (`user / assistant`), citation refs |
+| `ingest_logs` | Lịch sử các lần ingest, trạng thái, lỗi nếu có |
+| `system_config` | Cấu hình RAG: chunk size, overlap, top-k, LLM model |
+
+### 2. 🪣 Object Storage — MinIO (tương thích S3)
+
+Lưu trữ **file nhị phân gốc** — tách biệt hoàn toàn khỏi database để tối ưu hiệu năng và chi phí.
+
+| Bucket | Nội dung |
+|---|---|
+| `documents-raw` | File gốc khi người dùng tải lên (PDF, DOCX, TXT, MD) |
+| `documents-processed` | File đã qua xử lý / chuẩn hoá (text đã extract) |
+| `snapshots` | Snapshot tài liệu theo từng phiên bản (để rollback) |
+
+> **Lý do dùng Object Storage riêng:** File tài liệu có thể rất lớn (hàng chục MB/file). Lưu blob trực tiếp vào SQL làm chậm query và tốn bộ nhớ. MinIO cho phép truy cập file theo pre-signed URL, hỗ trợ versioning, và dễ dàng scale theo dung lượng.
+
+### 3. 🔍 Vector Database — Qdrant
+
+Lưu trữ **vector embeddings** của từng chunk tài liệu để phục vụ tìm kiếm ngữ nghĩa (semantic search).
+
+| Collection | Nội dung |
+|---|---|
+| `document_vectors` | Vector embedding của mỗi chunk · payload gồm `doc_id`, `chunk_index`, `page`, `text_preview` |
+
+| Trường payload | Mô tả |
+|---|---|
+| `doc_id` | Liên kết về bản ghi trong PostgreSQL |
+| `chunk_index` | Thứ tự chunk trong tài liệu gốc |
+| `page` | Số trang (dùng để hiển thị trích dẫn) |
+| `source_path` | Đường dẫn MinIO để tải lại file gốc nếu cần |
+| `text_preview` | 200 ký tự đầu của chunk (hiển thị nhanh không cần query PG) |
 
 ---
 
