@@ -286,10 +286,10 @@ Backend nhận query
 
 | STT | Họ và tên | MSSV | Nhiệm vụ |
 |-----|-----------|------|---------|
-| 1 | Nguyễn Văn A | 2021XXXXXX | Backend API, RAG Pipeline |
-| 2 | Trần Thị B | 2021XXXXXX | Frontend User, Streaming UI |
-| 3 | Lê Văn C | 2021XXXXXX | Frontend Admin, Docker Compose |
-| 4 | Phạm Thị D | 2021XXXXXX | Celery Worker, Ingest Pipeline |
+| 1 | Nguyễn Minh Huy | 24022356 | |
+| 2 | Cao Huy Hòa | 2021XXXXXX | |
+| 3 | Phạm Vũ Nam | 2021XXXXXX | |
+| 4 | Đinh Quang Minh | 2021XXXXXX |  |
 
 > **Giảng viên hướng dẫn:** [Tên giảng viên] — Đã được thêm quyền đọc vào repository.
 
