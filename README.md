@@ -50,57 +50,62 @@ graph TB
 
 ---
 
-## Thành phần hệ thống
+## Thành phần
 
 ### 1. Frontend người dùng (`/frontend-user`)
-- **Công nghệ:** Next.js 14, TailwindCSS, shadcn/ui
-- **Chức năng:**
-  - Giao diện chat hỏi đáp với AI
-  - Hiển thị câu trả lời **streaming** theo thời gian thực
-  - Hiển thị **nguồn trích dẫn** và đoạn văn liên quan (với tên tài liệu, trang, mức độ liên quan)
-  - Lịch sử hội thoại
-  - Đăng nhập / Đăng ký người dùng
-  - Hỏi đáp trên **Quy trình** làm việc
+
+Giao diện dành cho nhân viên hỏi đáp với trợ lý AI.
+
+| Chức năng | Mô tả |
+|---|---|
+| 💬 Chat hỏi đáp | Giao diện nhắn tin với AI, hỗ trợ markdown |
+| ⚡ Streaming | Câu trả lời hiển thị theo thời gian thực qua WebSocket |
+| 📄 Trích dẫn nguồn | Hiển thị tên tài liệu, số trang, điểm liên quan cho mỗi đoạn |
+| 📜 Lịch sử hội thoại | Lưu và xem lại các cuộc trò chuyện trước |
+| 🔐 Xác thực | Đăng nhập / Đăng ký tài khoản |
+| 📋 Hỏi đáp quy trình | Đặt câu hỏi theo từng quy trình / wiki nội bộ cụ thể |
+
+---
 
 ### 2. Frontend quản trị (`/frontend-admin`)
-- **Công nghệ:** Next.js 14, TailwindCSS, shadcn/ui
-- **Chức năng:**
-  - Quản lý người dùng: thêm, xóa, chỉnh sửa, phân quyền (admin / user)
-  - Quản lý tài liệu: tải lên (PDF, DOCX, TXT, MD), xóa, tái index
-  - Giám sát trạng thái ingest (pending → processing → completed / failed)
-  - Cấu hình hệ thống: LLM model, chunk size, overlap, top-k retrieval
-  - Thống kê sử dụng: số lượt truy vấn, tài liệu, người dùng
+
+Giao diện dành cho người quản lý kho tri thức doanh nghiệp.
+
+| Chức năng | Mô tả |
+|---|---|
+| 👤 Quản lý người dùng | Thêm, xóa, chỉnh sửa, phân quyền `admin / user` |
+| 📂 Quản lý tài liệu | Tải lên PDF, DOCX, TXT, MD · Xóa · Tái index |
+| 📊 Giám sát ingest | Theo dõi trạng thái: `pending → processing → completed / failed` |
+| ⚙️ Cấu hình RAG | Điều chỉnh LLM model, chunk size, overlap, top-k retrieval |
+| 📈 Thống kê | Số lượt truy vấn, tài liệu hoạt động, người dùng |
+
+---
 
 ### 3. Backend API (`/backend`)
-- **Công nghệ:** FastAPI, LangChain, Python 3.11
-- **Chức năng:**
-  - REST API + WebSocket (streaming)
-  - Pipeline RAG: query → embed → retrieve → rerank → generate
-  - Celery task dispatch
+
+Lõi xử lý RAG và điều phối toàn bộ hệ thống.
+
+| Chức năng | Mô tả |
+|---|---|
+| 🔄 Pipeline RAG | `query → embed → retrieve → rerank → generate` |
+| 📡 Streaming | Đẩy câu trả lời về client qua WebSocket |
+| 🔐 Xác thực | JWT authentication |
+| 🛡️ Phân quyền | RBAC (Role-Based Access Control) |
+| 📬 Task dispatch | Gửi tác vụ ingest sang Celery qua Redis |
+
+---
 
 ### 4. Celery Worker (`/worker`)
-- **Công nghệ:** Celery, Python 3.11
-- **Chức năng:**
-  - Xử lý tác vụ nền: chunking → embedding → upsert vào Qdrant
-  - Tái ingest khi tài liệu thay đổi
-  - Retry logic cho các tác vụ thất bại
 
-### 5. Lưu trữ
+Xử lý bất đồng bộ việc đưa tài liệu vào kho tri thức.
 
-| Loại | Công nghệ | Mục đích |
-|------|-----------|---------|
-| SQL Database | PostgreSQL 15 | Users, documents metadata, conversations, permissions |
-| Object Storage | MinIO | File gốc (PDF, DOCX, …), snapshot tài liệu |
-| Vector Database | Qdrant | Embedding vectors cho RAG retrieval |
-| Cache / Queue | Redis 7 | Session cache, Celery broker & result backend |
+| Chức năng | Mô tả |
+|---|---|
+| 📥 Ingest tài liệu | `chunking → embedding → upsert vào Qdrant` |
+| 🔁 Tái ingest | Tự động cập nhật khi tài liệu thay đổi |
+| 🔃 Retry logic | Tự động thử lại khi tác vụ thất bại |
 
-### 6. Load Balancer (`/nginx`)
-- **Công nghệ:** Nginx 1.25
-- **Chức năng:**
-  - Reverse proxy tới frontend và backend
-  - SSL termination (Let's Encrypt / self-signed)
-  - Rate limiting
-  - Gzip compression
+---
 
 ---
 
