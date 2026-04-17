@@ -1,0 +1,31 @@
+# =============================================================================
+# RAG System — Python Dependencies
+# =============================================================================
+
+# --- Web Framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# --- Database (PostgreSQL) ---
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+alembic==1.14.1
+
+# --- Object Storage (MinIO / S3) ---
+minio==7.2.12
+
+# --- Vector Database (Qdrant) ---
+qdrant-client==1.12.1
+
+# --- Cache / Message Broker (Redis) ---
+redis==5.2.1
+
+# --- Background Task Queue ---
+celery==5.4.0
+
+# --- Environment / Config ---
+python-dotenv==1.0.1
+pydantic-settings==2.7.1
+
+# --- HTTP Client (for health checks) ---
+httpx==0.28.1

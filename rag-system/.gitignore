@@ -1,0 +1,37 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables (never commit secrets)
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (if local)
+postgres_data/
+redis_data/
+minio_data/
+qdrant_data/
+
+# Distribution
+*.egg-info/
+dist/
+build/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
