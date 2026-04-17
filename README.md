@@ -15,37 +15,37 @@
 
 ---
 
-## Tổng quan kiến trúc
+## Kiến trúc hệ thống
 
-```
-                        ┌─────────────────────────────────────────────────────┐
-                        │                  NGINX Load Balancer                 │
-                        │              (Port 80 / 443 với SSL)                │
-                        └────────┬──────────────────┬──────────────────┬──────┘
-                                 │                  │                  │
-                    ┌────────────▼────┐   ┌─────────▼──────┐  ┌───────▼──────┐
-                    │  User Frontend  │   │ Admin Frontend │  │   Backend    │
-                    │   (Next.js)     │   │   (Next.js)    │  │  (FastAPI)   │
-                    │   Port: 3000    │   │   Port: 3001   │  │  Port: 8000  │
-                    └────────────┬────┘   └─────────┬──────┘  └───────┬──────┘
-                                 │                  │                  │
-                                 └──────────────────┴──────────────────┘
-                                                    │
-                    ┌───────────────────────────────▼───────────────────────────────┐
-                    │                        Backend Services                        │
-                    │                                                                │
-                    │   ┌─────────────┐   ┌─────────────┐   ┌──────────────────┐  │
-                    │   │  PostgreSQL  │   │    Redis     │   │     MinIO        │  │
-                    │   │  (Port 5432) │   │  (Port 6379) │   │  (Port 9000)     │  │
-                    │   │  Users, docs │   │  Cache/Queue │   │  File Storage    │  │
-                    │   └─────────────┘   └─────────────┘   └──────────────────┘  │
-                    │                                                                │
-                    │   ┌─────────────┐   ┌─────────────┐   ┌──────────────────┐  │
-                    │   │   Qdrant    │   │   Celery     │   │  Celery Worker   │  │
-                    │   │  (Port 6333) │   │   Broker     │   │  (Ingest Tasks)  │  │
-                    │   │  Vector DB  │   │  (Redis)     │   │                  │  │
-                    │   └─────────────┘   └─────────────┘   └──────────────────┘  │
-                    └───────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Client["👥 Client layer"]
+        FU["🖥️ Frontend người dùng\n/frontend-user\nNext.js 14 · TailwindCSS · shadcn/ui"]
+        FA["⚙️ Frontend quản trị\n/frontend-admin\nNext.js 14 · TailwindCSS · shadcn/ui"]
+    end
+
+    subgraph API["🔧 API layer"]
+        BE["🚀 Backend API\n/backend\nFastAPI · LangChain · Python 3.11"]
+    end
+
+    subgraph Worker["⚡ Worker layer"]
+        CW["🔄 Celery Worker\n/worker\nCelery · Python 3.11"]
+    end
+
+    subgraph Data["🗄️ Data layer"]
+        QD[("🔍 Qdrant\nVector store")]
+        RD[("⚡ Redis\nBroker + Cache")]
+        PG[("🐘 PostgreSQL\nUsers · Docs · Metadata")]
+    end
+
+    FU -- "REST / WebSocket" --> BE
+    FA -- "REST" --> BE
+    BE -- "Celery task dispatch" --> RD
+    RD --> CW
+    CW -- "Upsert vectors" --> QD
+    CW -- "Lưu metadata" --> PG
+    BE -- "Retrieve vectors" --> QD
+    BE -- "Read/Write" --> PG
 ```
 
 ---
@@ -60,6 +60,7 @@
   - Hiển thị **nguồn trích dẫn** và đoạn văn liên quan (với tên tài liệu, trang, mức độ liên quan)
   - Lịch sử hội thoại
   - Đăng nhập / Đăng ký người dùng
+  - Hỏi đáp trên **Quy trình** làm việc
 
 ### 2. Frontend quản trị (`/frontend-admin`)
 - **Công nghệ:** Next.js 14, TailwindCSS, shadcn/ui
@@ -75,8 +76,6 @@
 - **Chức năng:**
   - REST API + WebSocket (streaming)
   - Pipeline RAG: query → embed → retrieve → rerank → generate
-  - Xác thực JWT
-  - Phân quyền RBAC
   - Celery task dispatch
 
 ### 4. Celery Worker (`/worker`)
