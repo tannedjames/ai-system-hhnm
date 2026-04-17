@@ -354,9 +354,9 @@ Backend nhận query
 | STT | Họ và tên | MSSV | Nhiệm vụ |
 |-----|-----------|------|---------|
 | 1 | Nguyễn Minh Huy | 24022356 | |
-| 2 | Cao Huy Hòa | 2021XXXXXX | |
-| 3 | Phạm Vũ Nam | 2021XXXXXX | |
-| 4 | Đinh Quang Minh | 2021XXXXXX |  |
+| 2 | Cao Huy Hòa | 24022332 | |
+| 3 | Phạm Vũ Nam | 24022416 | |
+| 4 | Đinh Quang Minh | 24022398 | |
 
 > **Giảng viên hướng dẫn:** [Tên giảng viên] — Đã được thêm quyền đọc vào repository.
 
