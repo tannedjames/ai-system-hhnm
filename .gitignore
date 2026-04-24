@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.conda/
+qdrant_storage/
+.env
+__pycache__/
+.conda/
+qdrant_storage/
