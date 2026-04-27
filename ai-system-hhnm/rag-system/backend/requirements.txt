@@ -1,10 +1,12 @@
 # =============================================================================
-# RAG System — Python Dependencies
+# RAG System — Backend Gateway Python Dependencies
 # =============================================================================
+# Conda env: rag-311 (Python 3.11.7)
 
 # --- Web Framework ---
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+python-multipart>=0.0.6
 
 # --- Database (PostgreSQL) ---
 sqlalchemy==2.0.36
@@ -27,5 +29,5 @@ celery==5.4.0
 python-dotenv==1.0.1
 pydantic-settings==2.7.1
 
-# --- HTTP Client (for health checks) ---
+# --- HTTP Client (for health checks + microservice communication) ---
 httpx==0.28.1

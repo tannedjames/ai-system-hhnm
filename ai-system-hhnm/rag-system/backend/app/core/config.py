@@ -64,6 +64,18 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://:rag_redis_pass@localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://:rag_redis_pass@localhost:6379/1"
 
+    # --- Ollama ---
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_LLM_MODEL: str = "qwen3.5:4b"
+
+    # --- Qdrant Collection ---
+    QDRANT_COLLECTION: str = "rag_documents"
+
+    # --- Microservice URLs ---
+    EMBEDDING_SERVICE_URL: str = "http://localhost:8001"
+    RERANKER_SERVICE_URL: str = "http://localhost:8002"
+    RAG_SERVICE_URL: str = "http://localhost:8003"
+
 
 # Singleton instance — import this everywhere
 settings = Settings()

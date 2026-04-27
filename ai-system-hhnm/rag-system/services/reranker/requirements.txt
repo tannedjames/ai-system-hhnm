@@ -1,0 +1,18 @@
+# =============================================================================
+# Reranker Service — Python Dependencies
+# =============================================================================
+# Conda env: rag-rerank (Python 3.11.7)
+
+# --- Web Framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# --- Qwen3-Reranker-0.6B ---
+sentence-transformers>=2.7.0
+transformers>=4.51.0
+torch>=2.0.0
+
+# --- Shared ---
+pydantic>=2.0
+pydantic-settings>=2.7.1
+python-dotenv==1.0.1
