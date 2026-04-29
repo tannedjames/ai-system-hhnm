@@ -1,6 +1,6 @@
 # 📚 RAG Knowledge Base System
 
-> Hệ thống Retrieval-Augmented Generation (RAG) end-to-end — hỏi đáp thông minh dựa trên kho tài liệu nội bộ, tích hợp đầy đủ pipeline ingest → embed → query → answer với giao diện người dùng và quản trị viên.
+> Hệ thống hỏi–đáp dựa trên tài liệu nội bộ với pipeline RAG đầy đủ: ingest tài liệu → chunking → embedding → lưu vector → truy vấn ngữ nghĩa → sinh câu trả lời có trích dẫn nguồn. Ingest/reindex chạy nền bằng queue để không chặn trải nghiệm người dùng.
 
 ---
 
@@ -8,360 +8,426 @@
 
 - [Tổng quan kiến trúc](#tổng-quan-kiến-trúc)
 - [Thành phần hệ thống](#thành-phần-hệ-thống)
-- [Cấu trúc thư mục](#cấu-trúc-thư-mục)
-- [Tài khoản mặc định](#tài-khoản-mặc-định)
 - [Luồng hoạt động](#luồng-hoạt-động)
-- [Thành viên nhóm](#thành-viên-nhóm)
+- [Công nghệ sử dụng](#công-nghệ-sử-dụng)
+- [Cấu trúc thư mục](#cấu-trúc-thư-mục)
+- [Hướng dẫn chạy nhanh](#hướng-dẫn-chạy-nhanh)
+- [Tài khoản mặc định](#tài-khoản-mặc-định)
+- [API hiện có](#api-hiện-có)
+- [Lệnh vận hành thường dùng](#lệnh-vận-hành-thường-dùng)
+- [Quy trình tái hiện](#quy-trình-tái-hiện)
+- [Quy trình đánh giá](#quy-trình-đánh-giá)
+- [Tiêu chí đạt yêu cầu](#tiêu-chí-đạt-yêu-cầu)
+- [Lưu ý bảo mật](#lưu-ý-bảo-mật)
 
 ---
 
-## Kiến trúc hệ thống
+## Tổng quan kiến trúc
 
 ```mermaid
 graph TB
-    subgraph Client["👥 Client layer"]
-        FU["🖥️ Frontend người dùng\n/frontend-user\nNext.js 14 · TailwindCSS · shadcn/ui"]
-        FA["⚙️ Frontend quản trị\n/frontend-admin\nNext.js 14 · TailwindCSS · shadcn/ui"]
+    subgraph Client["Client Layer"]
+        FU["Frontend User\nstatic HTML + JS"]
+        FA["Frontend Admin\nstatic HTML + JS"]
     end
 
-    subgraph API["🔧 API layer"]
-        BE["🚀 Backend API\n/backend\nFastAPI · LangChain · Python 3.11"]
+    subgraph Gateway["Gateway"]
+        NG["Nginx\nreverse proxy + route"]
     end
 
-    subgraph Worker["⚡ Worker layer"]
-        CW["🔄 Celery Worker\n/worker\nCelery · Python 3.11"]
+    subgraph App["Application Layer"]
+        API["FastAPI\nAuth + RAG API + Admin API"]
+        WK["Celery Worker\nIngest/Reindex background jobs"]
     end
 
-    subgraph Data["🗄️ Data layer"]
-        PG[("🐘 PostgreSQL\nUsers · Docs · Metadata")]
-        MN[("🪣 MinIO\nFile gốc · Snapshot tài liệu")]
-        QD[("🔍 Qdrant\nVector embeddings")]
-        RD[("⚡ Redis\nBroker + Cache")]
+    subgraph Data["Data Layer"]
+        PG[("PostgreSQL\nusers, documents, ingest status")]
+        MN[("MinIO\nfile gốc tài liệu")]
+        QD[("Qdrant\nvector embeddings")]
+        RD[("Redis\nbroker + result backend")]
     end
 
-    FU -- "REST / WebSocket" --> BE
-    FA -- "REST" --> BE
-    BE -- "Lưu metadata" --> PG
-    BE -- "Upload file gốc" --> MN
-    BE -- "Dispatch task" --> RD
-    RD --> CW
-    CW -- "Tải file từ storage" --> MN
-    CW -- "Upsert vectors" --> QD
-    CW -- "Cập nhật trạng thái" --> PG
-    BE -- "Similarity search" --> QD
-    BE -- "Read/Write session" --> RD
+    FU --> NG
+    FA --> NG
+    NG --> API
+
+    API --> PG
+    API --> MN
+    API --> QD
+    API --> RD
+
+    API -->|dispatch task| WK
+    WK --> PG
+    WK --> MN
+    WK --> QD
+    WK --> RD
 ```
 
 ---
 
-## Thành phần
+## Thành phần hệ thống
 
-### 1. Frontend người dùng (`/frontend-user`)
+### 1. Frontend người dùng (`frontend-user/`)
 
-Giao diện dành cho nhân viên hỏi đáp với trợ lý AI.
+Giao diện hỏi–đáp dành cho người dùng cuối.
 
 | Chức năng | Mô tả |
 |---|---|
-| 💬 Chat hỏi đáp | Giao diện nhắn tin với AI, hỗ trợ markdown |
-| ⚡ Streaming | Câu trả lời hiển thị theo thời gian thực qua WebSocket |
-| 📄 Trích dẫn nguồn | Hiển thị tên tài liệu, số trang, điểm liên quan cho mỗi đoạn |
-| 📜 Lịch sử hội thoại | Lưu và xem lại các cuộc trò chuyện trước |
-| 🔐 Xác thực | Đăng nhập / Đăng ký tài khoản |
-| 📋 Hỏi đáp quy trình | Đặt câu hỏi theo từng quy trình / wiki nội bộ cụ thể |
+| Đăng nhập | Gọi API `/auth/login` lấy JWT |
+| Hỏi đáp thường | Gọi API `/ask` |
+| Hỏi đáp streaming | Gọi API SSE `/ask/stream` |
+| Trích dẫn nguồn | Hiển thị source/page/score/snippet |
 
----
+### 2. Frontend quản trị (`frontend-admin/`)
 
-### 2. Frontend quản trị (`/frontend-admin`)
-
-Giao diện dành cho người quản lý kho tri thức doanh nghiệp.
+Giao diện vận hành kho tri thức và người dùng.
 
 | Chức năng | Mô tả |
 |---|---|
-| 👤 Quản lý người dùng | Thêm, xóa, chỉnh sửa, phân quyền `admin / user` |
-| 📂 Quản lý tài liệu | Tải lên PDF, DOCX, TXT, MD · Xóa · Tái index |
-| 📊 Giám sát ingest | Theo dõi trạng thái: `pending → processing → completed / failed` |
-| ⚙️ Cấu hình RAG | Điều chỉnh LLM model, chunk size, overlap, top-k retrieval |
-| 📈 Thống kê | Số lượt truy vấn, tài liệu hoạt động, người dùng |
+| Upload tài liệu | `/documents/upload` |
+| Ingest web URL | `/documents/web` |
+| Ingest text trực tiếp | `/documents/text` |
+| Quản lý tài liệu | list/reindex/delete/task status |
+| Quản lý user | create/list/delete user |
+| Cấu hình hệ thống | chỉnh `chunk_size`, `chunk_overlap`, `top_k`, `llm_model` |
+| Queue reindex all | `/ingest` |
 
----
+### 3. Backend API (`api.py`)
 
-### 3. Backend API (`/backend`)
-
-Lõi xử lý RAG và điều phối toàn bộ hệ thống.
-
-| Chức năng | Mô tả |
-|---|---|
-| 🔄 Pipeline RAG | `query → embed → retrieve → rerank → generate` |
-| 📡 Streaming | Đẩy câu trả lời về client qua WebSocket |
-| 🔐 Xác thực | JWT authentication |
-| 🛡️ Phân quyền | RBAC (Role-Based Access Control) |
-| 📬 Task dispatch | Gửi tác vụ ingest sang Celery qua Redis |
-
----
-
-### 4. Celery Worker (`/worker`)
-
-Xử lý bất đồng bộ việc đưa tài liệu vào kho tri thức.
+FastAPI xử lý nghiệp vụ chính.
 
 | Chức năng | Mô tả |
 |---|---|
-| 📥 Ingest tài liệu | `chunking → embedding → upsert vào Qdrant` |
-| 🔁 Tái ingest | Tự động cập nhật khi tài liệu thay đổi |
-| 🔃 Retry logic | Tự động thử lại khi tác vụ thất bại |
+| JWT authentication | login + verify token |
+| RBAC cơ bản | phân quyền `admin`/`user` |
+| Document management | upload/web/text/reindex/delete |
+| RAG query | retrieve + generate + citations |
+| Streaming answer | SSE token streaming |
+| Health check | trạng thái Postgres/MinIO/Qdrant/Redis |
 
----
+### 4. Worker xử lý nền (`tasks.py`)
 
-## Chiến lược lưu trữ
+Celery worker xử lý ingest/reindex bất đồng bộ.
 
-Hệ thống sử dụng **ba loại lưu trữ chuyên biệt**, mỗi loại phục vụ một mục đích riêng biệt trong pipeline:
-
-```mermaid
-graph LR
-    DOC["📄 Tài liệu\ntải lên"] --> MN
-    MN["🪣 Object Storage\nMinIO"] -->|"Tải file gốc\nkhi ingest"| CW["🔄 Celery Worker"]
-    CW -->|"Lưu vector\nembeddings"| QD["🔍 Vector DB\nQdrant"]
-    CW -->|"Cập nhật\ntrạng thái"| PG["🐘 Relational DB\nPostgreSQL"]
-    PG -->|"Trích dẫn\nnguồn"| BE["🚀 Backend API"]
-    QD -->|"Semantic\nsearch"| BE
-    MN -->|"Tải lại file\nkhi cần"| BE
-```
-
-### 1. 🐘 Relational Database — PostgreSQL
-
-Lưu trữ toàn bộ **dữ liệu có cấu trúc** của hệ thống.
-
-| Bảng | Dữ liệu lưu trữ |
+| Bước | Mô tả |
 |---|---|
-| `users` | Tài khoản, mật khẩu hash, role (`admin / user`), thời gian tạo |
-| `documents` | Tên file, loại, đường dẫn MinIO, trạng thái ingest, phiên bản |
-| `document_chunks` | Mapping chunk ↔ document (chunk_id, vị trí, trang) |
-| `conversations` | Lịch sử hội thoại, user_id, timestamp |
-| `messages` | Nội dung tin nhắn, role (`user / assistant`), citation refs |
-| `ingest_logs` | Lịch sử các lần ingest, trạng thái, lỗi nếu có |
-| `system_config` | Cấu hình RAG: chunk size, overlap, top-k, LLM model |
+| 1 | Đọc metadata document từ PostgreSQL |
+| 2 | Lấy file từ MinIO hoặc fetch web |
+| 3 | Parse nội dung (PDF/TXT/MD/HTML hoặc web text) |
+| 4 | Chunking + embedding + upsert vào Qdrant |
+| 5 | Cập nhật trạng thái ingest trong PostgreSQL |
 
-### 2. 🪣 Object Storage — MinIO (tương thích S3)
+### 5. Lớp lưu trữ
 
-Lưu trữ **file nhị phân gốc** — tách biệt hoàn toàn khỏi database để tối ưu hiệu năng và chi phí.
-
-| Bucket | Nội dung |
+| Thành phần | Vai trò |
 |---|---|
-| `documents-raw` | File gốc khi người dùng tải lên (PDF, DOCX, TXT, MD) |
-| `documents-processed` | File đã qua xử lý / chuẩn hoá (text đã extract) |
-| `snapshots` | Snapshot tài liệu theo từng phiên bản (để rollback) |
-
-> **Lý do dùng Object Storage riêng:** File tài liệu có thể rất lớn (hàng chục MB/file). Lưu blob trực tiếp vào SQL làm chậm query và tốn bộ nhớ. MinIO cho phép truy cập file theo pre-signed URL, hỗ trợ versioning, và dễ dàng scale theo dung lượng.
-
-### 3. 🔍 Vector Database — Qdrant
-
-Lưu trữ **vector embeddings** của từng chunk tài liệu để phục vụ tìm kiếm ngữ nghĩa (semantic search).
-
-| Collection | Nội dung |
-|---|---|
-| `document_vectors` | Vector embedding của mỗi chunk · payload gồm `doc_id`, `chunk_index`, `page`, `text_preview` |
-
-| Trường payload | Mô tả |
-|---|---|
-| `doc_id` | Liên kết về bản ghi trong PostgreSQL |
-| `chunk_index` | Thứ tự chunk trong tài liệu gốc |
-| `page` | Số trang (dùng để hiển thị trích dẫn) |
-| `source_path` | Đường dẫn MinIO để tải lại file gốc nếu cần |
-| `text_preview` | 200 ký tự đầu của chunk (hiển thị nhanh không cần query PG) |
-
----
-
----
-
-## Cấu trúc thư mục
-
-```
-rag-system/
-├── docker-compose.yml              # Orchestration toàn bộ hệ thống
-├── docker-compose.override.yml     # Override cho môi trường dev
-├── .env.example                    # Template biến môi trường
-├── README.md
-│
-├── nginx/
-│   ├── Dockerfile
-│   ├── nginx.conf                  # Cấu hình chính
-│   └── conf.d/
-│       ├── user.conf               # Proxy tới frontend-user
-│       ├── admin.conf              # Proxy tới frontend-admin
-│       └── api.conf                # Proxy tới backend API
-│
-├── frontend-user/
-│   ├── Dockerfile
-│   ├── package.json
-│   ├── next.config.js
-│   └── src/
-│       ├── app/
-│       │   ├── (auth)/             # Login / Register pages
-│       │   ├── chat/               # Chat interface
-│       │   └── layout.tsx
-│       ├── components/
-│       │   ├── ChatWindow.tsx      # Streaming chat UI
-│       │   ├── SourcePanel.tsx     # Hiển thị nguồn trích dẫn
-│       │   └── MessageBubble.tsx
-│       └── lib/
-│           ├── api.ts
-│           └── streaming.ts        # SSE / WebSocket handler
-│
-├── frontend-admin/
-│   ├── Dockerfile
-│   ├── package.json
-│   └── src/
-│       ├── app/
-│       │   ├── dashboard/          # Tổng quan
-│       │   ├── documents/          # Quản lý tài liệu
-│       │   ├── users/              # Quản lý người dùng
-│       │   └── settings/           # Cấu hình hệ thống
-│       └── components/
-│           ├── DocumentUploader.tsx
-│           ├── IngestStatus.tsx    # Trạng thái ingest real-time
-│           └── UserTable.tsx
-│
-├── backend/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── alembic/                    # Database migrations
-│   │   ├── versions/
-│   │   └── env.py
-│   └── app/
-│       ├── main.py                 # FastAPI entry point
-│       ├── api/
-│       │   ├── v1/
-│       │   │   ├── auth.py         # Login, register, refresh token
-│       │   │   ├── chat.py         # Query endpoint (streaming)
-│       │   │   ├── documents.py    # Upload, delete, list, re-index
-│       │   │   ├── users.py        # CRUD users (admin only)
-│       │   │   └── settings.py     # System config
-│       ├── core/
-│       │   ├── config.py           # Settings từ .env
-│       │   ├── security.py         # JWT, password hashing
-│       │   └── deps.py             # Dependency injection
-│       ├── models/
-│       │   ├── user.py             # SQLAlchemy models
-│       │   ├── document.py
-│       │   └── conversation.py
-│       ├── rag/
-│       │   ├── embedder.py         # Text → vector embedding
-│       │   ├── retriever.py        # Qdrant similarity search
-│       │   ├── reranker.py         # Cross-encoder reranking
-│       │   ├── generator.py        # LLM streaming generation
-│       │   └── pipeline.py         # End-to-end RAG pipeline
-│       ├── storage/
-│       │   ├── minio_client.py     # MinIO operations
-│       │   ├── qdrant_client.py    # Qdrant operations
-│       │   └── postgres.py         # SQLAlchemy session
-│       └── tasks/
-│           └── ingest.py           # Celery task definitions
-│
-├── worker/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── tasks/
-│       ├── ingest_pipeline.py      # Chunking → embedding → upsert
-│       ├── reindex.py              # Tái index tài liệu
-│       └── cleanup.py             # Xóa vector khi xóa tài liệu
-│
-├── db/
-│   └── init.sql                    # Khởi tạo schema PostgreSQL
-│
-└── scripts/
-    ├── seed_admin.py               # Tạo tài khoản admin mặc định
-    ├── healthcheck.sh              # Kiểm tra trạng thái services
-    └── backup.sh                   # Backup DB + MinIO + Qdrant
-```
-
-
-
-### Lệnh quản lý thường dùng
-
-```bash
-# Xem log của một service
-docker compose logs -f backend
-docker compose logs -f worker
-
-# Restart một service
-docker compose restart backend
-
-# Dừng toàn bộ hệ thống (giữ volume)
-docker compose down
-
-# Dừng và xóa toàn bộ dữ liệu (NGUY HIỂM)
-docker compose down -v
-
-# Scale worker (nếu cần xử lý nhiều tài liệu)
-docker compose up -d --scale worker=3
-
-# Chạy backup thủ công
-docker compose exec backend bash /app/scripts/backup.sh
-```
+| PostgreSQL | Lưu user + metadata tài liệu + ingest status |
+| MinIO | Lưu file gốc tài liệu |
+| Qdrant | Lưu vector embedding của chunks |
+| Redis | Message queue và result backend cho Celery |
 
 ---
 
 ## Luồng hoạt động
 
-### A. Luồng Ingest tài liệu (chạy nền)
+### A. Luồng ingest tài liệu (background)
 
-```
-Admin upload file
-     │
-     ▼
-Backend nhận file
-     │
-     ├─► Lưu file gốc → MinIO (bucket: documents)
-     ├─► Tạo record → PostgreSQL (status: pending)
-     └─► Dispatch Celery task
-              │
-              ▼
-         Celery Worker
-              │
-              ├─ 1. Parse file (PDF/DOCX/TXT → text)
-              ├─ 2. Chunk text (size/overlap từ config)
-              ├─ 3. Embed chunks (Embedding model)
-              ├─ 4. Upsert vectors → Qdrant
-              ├─ 5. Cập nhật status → PostgreSQL (completed)
-              └─ 6. (Nếu lỗi) Retry & cập nhật status: failed
+```text
+Admin upload/ingest source
+    -> API tạo record documents (status=pending)
+    -> API dispatch Celery task
+    -> Worker xử lý parse/chunk/embed/upsert
+    -> Worker cập nhật status=completed/failed
 ```
 
-### B. Luồng RAG Query (streaming)
+### B. Luồng hỏi đáp RAG
 
-```
+```text
 User gửi câu hỏi
-     │
-     ▼
-Backend nhận query
-     │
-     ├─ 1. Embed query → vector
-     ├─ 2. Similarity search → Qdrant (top-k chunks)
-     ├─ 3. Rerank kết quả (cross-encoder)
-     ├─ 4. Build prompt (system + context + query)
-     ├─ 5. Stream LLM response → SSE
-     └─ 6. Lưu conversation → PostgreSQL
-              │
-              ▼
-         Frontend nhận stream
-              │
-              ├─ Hiển thị token dần dần
-              └─ Hiển thị nguồn trích dẫn (sau khi stream xong)
+    -> API embed query
+    -> Qdrant semantic search top-k
+    -> API build prompt từ chunks retrieve được
+    -> LLM sinh câu trả lời
+    -> Trả về answer + citations
+```
+
+### C. Luồng streaming
+
+```text
+User gọi /ask/stream
+    -> API gửi event citations
+    -> API stream token dần qua SSE
+    -> API gửi event done khi kết thúc
 ```
 
 ---
 
-## Thành viên nhóm
+## Công nghệ sử dụng
 
-| STT | Họ và tên | MSSV | Nhiệm vụ |
-|-----|-----------|------|---------|
-| 1 | Nguyễn Minh Huy | 24022356 | |
-| 2 | Cao Huy Hòa | 24022332 | |
-| 3 | Phạm Vũ Nam | 24022416 | |
-| 4 | Đinh Quang Minh | 24022398 | |
-
-> **Giảng viên hướng dẫn:** [Tên giảng viên] — Đã được thêm quyền đọc vào repository.
+- Backend: FastAPI, SQLAlchemy, Uvicorn
+- RAG: LangChain, langchain-qdrant, Google Generative AI embeddings + LLM
+- Vector DB: Qdrant
+- Object Storage: MinIO
+- Database: PostgreSQL
+- Queue: Celery + Redis
+- Gateway: Nginx
+- Containerization: Docker, Docker Compose
 
 ---
 
-## Giấy phép
+## Cấu trúc thư mục
 
-MIT License — Xem file [LICENSE](./LICENSE) để biết thêm chi tiết.
+```text
+.
+├── api.py
+├── auth.py
+├── celery_app.py
+├── db.py
+├── rag.py
+├── rag_ingest.py
+├── tasks.py
+├── storage.py
+├── requirement.txt
+├── Dockerfile
+├── docker-compose.yml
+├── nginx/
+│   └── nginx.conf
+├── frontend-user/
+│   ├── Dockerfile
+│   └── index.html
+├── frontend-admin/
+│   ├── Dockerfile
+│   └── index.html
+├── rag-system/
+│   └── db/
+│       └── init.sql
+```
+
+---
+
+## Hướng dẫn chạy nhanh
+
+### 1. Chuẩn bị
+
+- Cài Docker Desktop (hoặc Docker Engine + Compose).
+- Tạo file cấu hình từ template:
+
+```bash
+cp .env.example .env
+```
+
+- Cập nhật bắt buộc trong `.env`:
+  - `GOOGLE_API_KEY`
+  - `SECRET_KEY` (>= 32 ký tự)
+  - `ADMIN_PASSWORD` (không dùng giá trị mặc định)
+- Ghi chú: file upload được lưu tạm tại `RAG_STAGING_DIR` (mặc định `/tmp/rag-staging`), không cần bind thư mục `data/` của project.
+
+### 2. Build và chạy
+
+```bash
+docker compose up -d --build
+```
+
+### 3. Kiểm tra service
+
+```bash
+docker compose ps
+curl http://localhost/api/health
+```
+
+### 4. Truy cập giao diện
+
+- User UI: `http://localhost/`
+- Admin UI: `http://localhost/admin/`
+- API docs: `http://localhost/api/docs`
+
+### 5. Truy cập dịch vụ data (nếu cần)
+
+- MinIO Console: `http://localhost:9001`
+- Qdrant API: `http://localhost:6333`
+- PostgreSQL: `localhost:5432`
+- Redis: `localhost:6379`
+
+---
+
+## Tài khoản mặc định
+
+- Admin email: `admin@example.com`
+- Admin password: `admin123`
+
+Tài khoản này được seed tự động khi backend startup (`seed_default_admin`).
+
+---
+
+## API hiện có
+
+### Public
+
+- `GET /health`
+- `POST /auth/login`
+
+### Authenticated user/admin
+
+- `GET /me`
+- `POST /ask`
+- `POST /ask/stream`
+
+### Admin only
+
+- `GET /users`
+- `POST /users`
+- `PATCH /users/{user_id}`
+- `DELETE /users/{user_id}`
+- `GET /settings`
+- `PATCH /settings`
+- `POST /upload` (alias cũ)
+- `POST /documents/upload`
+- `POST /documents/web`
+- `POST /documents/text`
+- `GET /documents`
+- `GET /documents/{doc_id}`
+- `GET /documents/{doc_id}/task`
+- `POST /documents/{doc_id}/reindex`
+- `DELETE /documents/{doc_id}`
+- `POST /ingest`
+
+---
+
+## Lệnh vận hành thường dùng
+
+```bash
+# Theo dõi log
+docker compose logs -f api
+docker compose logs -f worker
+docker compose logs -f nginx
+
+# Restart service
+docker compose restart api worker
+
+# Dừng toàn bộ
+docker compose down
+
+# Dừng và xóa toàn bộ dữ liệu volume
+docker compose down -v
+
+# Scale worker khi ingest lớn
+docker compose up -d --scale worker=3
+
+# Backup dữ liệu nhanh (Postgres + MinIO + Qdrant)
+bash scripts/backup.sh
+```
+
+---
+
+## Quy trình tái hiện
+
+### Mục tiêu
+
+Tái hiện đầy đủ hệ thống RAG đa dịch vụ bằng Docker Compose và xác nhận pipeline hoạt động từ ingest đến hỏi–đáp có trích dẫn.
+
+### Điều kiện môi trường
+
+- Docker + Docker Compose.
+- Cổng trống: `80, 5432, 6379, 6333, 9000, 9001`.
+- `.env` hợp lệ được tạo từ `.env.example`.
+
+### Các bước thực hiện
+
+1. Khởi động hệ thống:
+
+```bash
+docker compose up -d --build
+```
+
+2. Kiểm tra service:
+
+```bash
+docker compose ps
+curl http://localhost/api/health
+```
+
+3. Đăng nhập Admin tại `http://localhost/admin/` với:
+- `admin@example.com`
+- `admin123`
+
+4. Ingest ít nhất 1 tài liệu bằng một trong ba cách:
+- Upload file (`/documents/upload`)
+- Ingest URL (`/documents/web`)
+- Ingest text (`/documents/text`)
+
+5. Theo dõi trạng thái ingest:
+- Vào bảng Documents trên admin UI.
+- Trạng thái phải đi qua `pending/processing` và về `completed`.
+
+6. Truy vấn từ user UI `http://localhost/`:
+- Đăng nhập.
+- Hỏi câu liên quan nội dung vừa ingest.
+- Xác nhận có `answer` và danh sách `citations`.
+
+---
+
+## Quy trình đánh giá
+
+### Kịch bản demo tối thiểu (5–10 phút)
+
+1. Mở `http://localhost/api/health` để chứng minh dependency sống.
+2. Admin ingest một tài liệu mới.
+3. Kiểm tra task ingest và trạng thái completed.
+4. User đặt câu hỏi lấy thông tin từ tài liệu.
+5. Trình bày trích dẫn nguồn (source/page/snippet).
+6. Thực hiện reindex một tài liệu.
+7. Thực hiện delete tài liệu và refresh danh sách.
+
+### Bằng chứng nên chụp cho báo cáo
+
+- `docker compose ps` đầy đủ container.
+- API health response.
+- Màn hình admin: ingest + trạng thái.
+- Màn hình user: answer + citations.
+- Log worker khi ingest (`docker compose logs -f worker`).
+
+---
+
+## Tiêu chí đạt yêu cầu
+
+### Checklist theo yêu cầu nhánh RAG
+
+- [x] Ingest tài liệu (file/web/text).
+- [x] Chunking + embedding + lưu vector database.
+- [x] Semantic query + sinh câu trả lời.
+- [x] Trả lời có trích dẫn nguồn.
+- [x] Queue nền cho ingest/reindex (Celery + Redis).
+- [x] Frontend user cho hỏi đáp.
+- [x] Frontend admin cho quản lý user/document/ingest.
+- [x] Backend API điều phối nghiệp vụ.
+- [x] Sử dụng đủ 3 lớp lưu trữ:
+  - SQL: PostgreSQL
+  - Object storage: MinIO
+  - Vector DB: Qdrant
+- [x] Có load balancer/reverse proxy: Nginx.
+
+### Trạng thái hiện tại
+
+Hệ thống đáp ứng đầy đủ yêu cầu cốt lõi của bài toán RAG containerized.  
+Các hạng mục cộng điểm (CI/CD, Kubernetes/Helm, monitoring, backup pipeline, multi-layer cache, internet deployment với SSL/domain) chưa được triển khai trong repository hiện tại.
+
+---
+
+## Lưu ý bảo mật
+
+- Không commit `.env` thật (chứa API key).
+- Bắt buộc đổi `SECRET_KEY` và `ADMIN_PASSWORD` mặc định trước khi deploy internet.
+- Hạn chế `allow_origins` trong CORS cho production.
+- Khuyến nghị bật HTTPS (nginx + TLS) nếu public ra ngoài.
+- Khi chạy `APP_ENV=production`, backend sẽ từ chối khởi động nếu phát hiện cấu hình bảo mật mặc định.
+
+---
+
+## Use cases phù hợp
+
+Hệ thống hiện tại dùng được cho cả hai tình huống:
+
+- Trường hợp 1: Trợ lý nội bộ doanh nghiệp (quy trình, handbook, wiki).
+- Trường hợp 2: Trợ lý tra cứu học thuật/môn học (giáo trình, đề cương, bài tập).
+
+Phân loại 1 hay 2 phụ thuộc vào bộ tài liệu bạn ingest vào kho tri thức.

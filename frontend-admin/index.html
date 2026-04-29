@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAG Admin</title>
+  <style>
+    :root {
+      --bg: #f3f4f6;
+      --card: #ffffff;
+      --ink: #111827;
+      --muted: #4b5563;
+      --line: #d1d5db;
+      --primary: #1d4ed8;
+      --danger: #b91c1c;
+      --ok: #0f766e;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: radial-gradient(circle at 30% 0%, #e0ecff, #f3f4f6 48%);
+      color: var(--ink);
+    }
+    .layout {
+      max-width: 1100px;
+      margin: 24px auto;
+      padding: 0 16px 24px;
+      display: grid;
+      gap: 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 1.4rem;
+    }
+    h2 {
+      margin: 0 0 10px;
+      font-size: 1.1rem;
+    }
+    .grid {
+      display: grid;
+      gap: 8px;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    input, textarea, select, button {
+      font: inherit;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    textarea {
+      min-height: 90px;
+      resize: vertical;
+    }
+    button {
+      background: var(--primary);
+      color: #fff;
+      border: 0;
+      cursor: pointer;
+    }
+    button.alt {
+      background: #374151;
+    }
+    button.danger {
+      background: var(--danger);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+    }
+    th, td {
+      border-bottom: 1px solid #e5e7eb;
+      text-align: left;
+      padding: 8px 6px;
+      vertical-align: top;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .ok { color: var(--ok); }
+    .danger-text { color: var(--danger); }
+    #status { min-height: 18px; }
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <section class="card">
+      <h1>RAG Admin Console</h1>
+      <div class="grid">
+        <div class="row">
+          <input id="email" placeholder="Admin email" />
+          <input id="password" type="password" placeholder="Admin password" />
+          <button id="loginBtn">Login</button>
+          <a href="/" target="_blank">Open User UI</a>
+        </div>
+        <div id="status" class="muted">Not authenticated</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Ingest Sources</h2>
+      <div class="grid">
+        <div class="row">
+          <input id="uploadFile" type="file" />
+          <button id="uploadBtn">Upload File</button>
+        </div>
+        <div class="row">
+          <input id="webUrl" style="min-width:420px" placeholder="https://..." />
+          <input id="webTitle" placeholder="Title (optional)" />
+          <button id="webBtn">Ingest Web URL</button>
+        </div>
+        <input id="textTitle" placeholder="Text title" />
+        <textarea id="textContent" placeholder="Paste plain text / syllabus / policy / lesson content..."></textarea>
+        <div class="row">
+          <button id="textBtn">Ingest Text</button>
+          <button id="refreshDocsBtn" class="alt">Refresh Documents</button>
+          <button id="ingestAllBtn" class="alt">Queue Reindex All</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Documents</h2>
+      <div class="muted">Track ingest status, reindex and delete.</div>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Source</th>
+            <th>Status</th>
+            <th>Chunks</th>
+            <th>Task</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="docsBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Users</h2>
+      <div class="row">
+        <input id="newUserEmail" placeholder="email@example.com" />
+        <input id="newUserName" placeholder="Full name" />
+        <input id="newUserPass" placeholder="Password >= 6" />
+        <select id="newUserRole">
+          <option value="user">user</option>
+          <option value="admin">admin</option>
+        </select>
+        <button id="createUserBtn">Create User</button>
+        <button id="refreshUsersBtn" class="alt">Refresh Users</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Email</th>
+            <th>Name</th>
+            <th>Role</th>
+            <th>Active</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="usersBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>System Settings</h2>
+      <div class="muted">Runtime config for RAG query and next ingest jobs.</div>
+      <div class="row" style="margin-top: 8px;">
+        <input id="cfgChunkSize" type="number" min="100" max="4000" placeholder="chunk_size" />
+        <input id="cfgChunkOverlap" type="number" min="0" max="2000" placeholder="chunk_overlap" />
+        <input id="cfgTopK" type="number" min="1" max="20" placeholder="top_k" />
+        <input id="cfgLlmModel" style="min-width:260px" placeholder="llm_model" />
+        <button id="saveSettingsBtn">Save Settings</button>
+        <button id="refreshSettingsBtn" class="alt">Refresh Settings</button>
+      </div>
+      <div id="settingsMeta" class="muted" style="margin-top: 8px;">Not loaded</div>
+    </section>
+  </main>
+
+  <script>
+    let token = "";
+
+    function setStatus(text, cls = "muted") {
+      const el = document.getElementById("status");
+      el.className = cls;
+      el.textContent = text;
+    }
+
+    async function api(path, options = {}) {
+      const headers = options.headers || {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      if (options.body && !(options.body instanceof FormData) && !headers["Content-Type"]) {
+        headers["Content-Type"] = "application/json";
+      }
+      const res = await fetch("/api" + path, { ...options, headers });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const type = res.headers.get("content-type") || "";
+      if (type.includes("application/json")) return res.json();
+      return res.text();
+    }
+
+    async function login() {
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value;
+      const body = new URLSearchParams();
+      body.set("username", email);
+      body.set("password", password);
+
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body
+      });
+      if (!res.ok) {
+        setStatus("Login failed", "danger-text");
+        return;
+      }
+
+      const data = await res.json();
+      token = data.access_token;
+      setStatus("Authenticated", "ok");
+      await Promise.all([loadDocuments(), loadUsers(), loadSettings()]);
+    }
+
+    async function uploadFile() {
+      const input = document.getElementById("uploadFile");
+      if (!input.files.length) return;
+      const form = new FormData();
+      form.append("file", input.files[0]);
+      await api("/documents/upload", { method: "POST", body: form });
+      await loadDocuments();
+      setStatus("File queued for ingest", "ok");
+    }
+
+    async function ingestWeb() {
+      const url = document.getElementById("webUrl").value.trim();
+      const title = document.getElementById("webTitle").value.trim();
+      await api("/documents/web", {
+        method: "POST",
+        body: JSON.stringify({ url, title: title || null })
+      });
+      await loadDocuments();
+      setStatus("Web URL queued for ingest", "ok");
+    }
+
+    async function ingestText() {
+      const title = document.getElementById("textTitle").value.trim();
+      const content = document.getElementById("textContent").value.trim();
+      await api("/documents/text", {
+        method: "POST",
+        body: JSON.stringify({ title, content })
+      });
+      await loadDocuments();
+      setStatus("Text document queued for ingest", "ok");
+    }
+
+    async function queueReindexAll() {
+      await api("/ingest", { method: "POST" });
+      await loadDocuments();
+      setStatus("Reindex all queued", "ok");
+    }
+
+    async function loadDocuments() {
+      const docs = await api("/documents");
+      const body = document.getElementById("docsBody");
+      body.innerHTML = "";
+
+      for (const doc of docs) {
+        const tr = document.createElement("tr");
+        const source = doc.source_uri ? `${doc.source_type} (${doc.source_uri})` : doc.source_type;
+        tr.innerHTML = `
+          <td>${doc.id}</td>
+          <td>${doc.filename}</td>
+          <td class="muted">${source}</td>
+          <td>${doc.status}</td>
+          <td>${doc.chunk_count}</td>
+          <td class="muted">${doc.ingest_task_id || "-"}</td>
+          <td>
+            <button data-action="task" data-id="${doc.id}" class="alt">Task</button>
+            <button data-action="reindex" data-id="${doc.id}" class="alt">Reindex</button>
+            <button data-action="delete" data-id="${doc.id}" class="danger">Delete</button>
+          </td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    async function handleDocumentAction(e) {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const id = btn.dataset.id;
+      const action = btn.dataset.action;
+
+      if (action === "reindex") {
+        await api(`/documents/${id}/reindex`, { method: "POST" });
+        await loadDocuments();
+        setStatus(`Reindex queued for document ${id}`, "ok");
+      } else if (action === "delete") {
+        await api(`/documents/${id}`, { method: "DELETE" });
+        await loadDocuments();
+        setStatus(`Deleted document ${id}`, "ok");
+      } else if (action === "task") {
+        const task = await api(`/documents/${id}/task`);
+        setStatus(`Task ${task.task_id || "-"} state: ${task.state}`, "muted");
+      }
+    }
+
+    async function loadUsers() {
+      const users = await api("/users");
+      const body = document.getElementById("usersBody");
+      body.innerHTML = "";
+
+      users.forEach((user) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${user.id}</td>
+          <td>${user.email}</td>
+          <td>${user.full_name || "-"}</td>
+          <td>${user.role}</td>
+          <td>${user.is_active}</td>
+          <td>
+            <button data-user-delete="${user.id}" class="danger">Delete</button>
+          </td>
+        `;
+        body.appendChild(tr);
+      });
+    }
+
+    async function createUser() {
+      const email = document.getElementById("newUserEmail").value.trim();
+      const full_name = document.getElementById("newUserName").value.trim();
+      const password = document.getElementById("newUserPass").value;
+      const role = document.getElementById("newUserRole").value;
+      await api("/users", {
+        method: "POST",
+        body: JSON.stringify({ email, full_name, password, role, is_active: true })
+      });
+      await loadUsers();
+      setStatus("User created", "ok");
+    }
+
+    function settingsPayload() {
+      return {
+        chunk_size: Number(document.getElementById("cfgChunkSize").value),
+        chunk_overlap: Number(document.getElementById("cfgChunkOverlap").value),
+        top_k: Number(document.getElementById("cfgTopK").value),
+        llm_model: document.getElementById("cfgLlmModel").value.trim()
+      };
+    }
+
+    function renderSettings(data) {
+      document.getElementById("cfgChunkSize").value = data.chunk_size;
+      document.getElementById("cfgChunkOverlap").value = data.chunk_overlap;
+      document.getElementById("cfgTopK").value = data.top_k;
+      document.getElementById("cfgLlmModel").value = data.llm_model || "";
+      document.getElementById("settingsMeta").textContent = `Updated at: ${data.updated_at || "-"}`;
+    }
+
+    async function loadSettings() {
+      const data = await api("/settings");
+      renderSettings(data);
+    }
+
+    async function saveSettings() {
+      const payload = settingsPayload();
+      if (!payload.llm_model) {
+        throw new Error("llm_model is required");
+      }
+      if (payload.chunk_overlap >= payload.chunk_size) {
+        throw new Error("chunk_overlap must be smaller than chunk_size");
+      }
+      const data = await api("/settings", {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      });
+      renderSettings(data);
+      setStatus("Settings updated", "ok");
+    }
+
+    async function handleUserDelete(e) {
+      const btn = e.target.closest("button[data-user-delete]");
+      if (!btn) return;
+      const id = btn.dataset.userDelete;
+      await api(`/users/${id}`, { method: "DELETE" });
+      await loadUsers();
+      setStatus(`Deleted user ${id}`, "ok");
+    }
+
+    document.getElementById("loginBtn").addEventListener("click", login);
+    document.getElementById("uploadBtn").addEventListener("click", () => uploadFile().catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("webBtn").addEventListener("click", () => ingestWeb().catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("textBtn").addEventListener("click", () => ingestText().catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("ingestAllBtn").addEventListener("click", () => queueReindexAll().catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("refreshDocsBtn").addEventListener("click", () => loadDocuments().catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("refreshUsersBtn").addEventListener("click", () => loadUsers().catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("createUserBtn").addEventListener("click", () => createUser().catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("saveSettingsBtn").addEventListener("click", () => saveSettings().catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("refreshSettingsBtn").addEventListener("click", () => loadSettings().catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("docsBody").addEventListener("click", (e) => handleDocumentAction(e).catch((err) => setStatus(err.message, "danger-text")));
+    document.getElementById("usersBody").addEventListener("click", (e) => handleUserDelete(e).catch((err) => setStatus(err.message, "danger-text")));
+  </script>
+</body>
+</html>

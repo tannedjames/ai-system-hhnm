@@ -1,0 +1,15 @@
+rag-project/
+│
+├── api.py
+├── rag.py
+├── db.py              ← NEW (PostgreSQL)
+├── storage.py         ← NEW (MinIO)
+├── requirement.txt
+├── Dockerfile         ← NEW
+├── docker-compose.yml ← NEW
+├── .env               ← NEW
+│
+├── data/              ← temp PDFs
+├── qdrant_storage/    ← vector DB files
+│
+└── tree.txt           ← (optional, for submission)

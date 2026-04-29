@@ -3,7 +3,5 @@ __pycache__/
 *.pyc
 .conda/
 qdrant_storage/
-.env
-__pycache__/
-.conda/
-qdrant_storage/
+backups/
+.DS_Store
