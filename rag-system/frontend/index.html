@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RAG Academic Search</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      background: white;
+      width: 100%;
+      max-width: 760px;
+      padding: 32px;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+    }
+    h1 { font-size: 1.6rem; margin-bottom: 4px; color: #222; }
+    .sub { color: #666; margin-bottom: 24px; font-size: 0.95rem; }
+    .status {
+      padding: 12px 14px;
+      border-radius: 8px;
+      margin-bottom: 24px;
+      font-size: 0.9rem;
+    }
+    .status.ok    { background: #e8f5e9; color: #1b5e20; }
+    .status.bad   { background: #ffebee; color: #b71c1c; }
+    .status.warn  { background: #fff8e1; color: #6d4c00; }
+    .section { margin-bottom: 24px; }
+    h2 {
+      color: #4f46e5;
+      font-size: 1.05rem;
+      margin-bottom: 12px;
+      padding-bottom: 6px;
+      border-bottom: 2px solid #e5e7eb;
+    }
+    input, textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      margin-bottom: 8px;
+    }
+    button {
+      background: #4f46e5;
+      color: white;
+      border: 0;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    button:hover { background: #4338ca; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .drop {
+      border: 2px dashed #c7d2fe;
+      padding: 24px;
+      border-radius: 8px;
+      text-align: center;
+      cursor: pointer;
+      color: #4f46e5;
+    }
+    .drop:hover { background: #eef2ff; }
+    .answer {
+      background: #f9fafb;
+      padding: 14px;
+      border-radius: 6px;
+      margin-top: 12px;
+      white-space: pre-wrap;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🔍 RAG Academic Search</h1>
+    <p class="sub">Powered by Gemini — upload documents and ask questions.</p>
+
+    <div id="status" class="status warn">Checking backend...</div>
+
+    <div class="section">
+      <h2>Upload</h2>
+      <label class="drop" for="file">Click to choose PDF, TXT, DOCX, or MD</label>
+      <input id="file" type="file" hidden>
+      <div id="uploadMsg" style="margin-top:8px; font-size:0.9rem; color:#374151;"></div>
+    </div>
+
+    <div class="section">
+      <h2>Ask</h2>
+      <textarea id="q" rows="3" placeholder="Ask a question..."></textarea>
+      <button id="askBtn">Ask Gemini</button>
+      <div id="answer"></div>
+    </div>
+  </div>
+
+  <script>
+    const API = "http://localhost:8000";
+    const statusEl = document.getElementById("status");
+    const uploadMsg = document.getElementById("uploadMsg");
+    const fileInput = document.getElementById("file");
+    const askBtn = document.getElementById("askBtn");
+    const answerEl = document.getElementById("answer");
+
+    async function checkHealth() {
+      try {
+        const r = await fetch(`${API}/health`);
+        const d = await r.json();
+        statusEl.className = "status ok";
+        statusEl.textContent = `✅ Connected — ${d.gemini_model}`;
+      } catch (e) {
+        statusEl.className = "status bad";
+        statusEl.textContent = "❌ Backend not reachable. Start it with: uvicorn backend.main:app --reload";
+      }
+    }
+
+    fileInput.addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      uploadMsg.textContent = `Uploading ${file.name}...`;
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const r = await fetch(`${API}/api/documents/upload`, { method: "POST", body: fd });
+        const d = await r.json();
+        if (r.ok) uploadMsg.textContent = `✅ Uploaded ${d.file.name} (${d.file.size_mb} MB)`;
+        else      uploadMsg.textContent = `❌ ${d.message || "Upload failed"}`;
+      } catch (err) {
+        uploadMsg.textContent = `❌ ${err.message}`;
+      }
+    });
+
+    askBtn.addEventListener("click", async () => {
+      const question = document.getElementById("q").value.trim();
+      if (!question) return;
+      askBtn.disabled = true;
+      answerEl.innerHTML = `<div class="answer">Thinking...</div>`;
+      try {
+        const r = await fetch(`${API}/api/ask`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question }),
+        });
+        const d = await r.json();
+        answerEl.innerHTML = `<div class="answer">${(d.answer || d.message || "No response").replace(/</g,"&lt;")}</div>`;
+      } catch (err) {
+        answerEl.innerHTML = `<div class="answer">❌ ${err.message}</div>`;
+      } finally {
+        askBtn.disabled = false;
+      }
+    });
+
+    checkHealth();
+  </script>
+</body>
+</html>
