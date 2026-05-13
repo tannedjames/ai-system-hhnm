@@ -1,16 +1,22 @@
-"""FastAPI backend with TrollLLM (Claude proxy) integration."""
+"""FastAPI backend with full RAG pipeline."""
+import json
 import logging
-import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from backend.config import settings
+from backend.models import Document, Conversation
+from backend.storage.database import init_db, get_db
+from backend.storage import qdrant_client as qdrant
+from backend.storage import minio_client as minio
+from backend.rag_embedding import embed_text
 
 # Logging
 logging.basicConfig(
@@ -19,9 +25,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("rag-backend")
 
-# TrollLLM endpoint
-TROLLLLM_BASE_URL = settings.ANTHROPIC_BASE_URL
-
 
 # ---------- Lifespan ----------
 @asynccontextmanager
@@ -29,8 +32,17 @@ async def lifespan(app: FastAPI):
     logger.info("Starting RAG backend")
     logger.info(f"Environment   : {settings.ENVIRONMENT}")
     logger.info(f"Claude model  : {settings.CLAUDE_MODEL}")
-    logger.info(f"Upload dir    : {settings.UPLOAD_DIR}")
-    logger.info(f"Vector DB     : {settings.CHROMA_DB_PATH}")
+
+    # Initialize all storage backends
+    try:
+        init_db()
+        qdrant.init_collection()
+        minio.init_bucket()
+        logger.info("All storage backends initialized")
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
+        logger.warning("Some services may not be available - check Docker Compose")
+
     yield
     logger.info("Shutting down RAG backend")
 
@@ -52,10 +64,10 @@ app.add_middleware(
 )
 
 
-# ---------- Models ----------
+# ---------- Request models ----------
 class AskRequest(BaseModel):
     question: str
-    top_k: int = 3
+    top_k: int = 5
 
 
 class SearchRequest(BaseModel):
@@ -63,59 +75,52 @@ class SearchRequest(BaseModel):
     top_k: int = 5
 
 
-# ---------- TrollLLM helper ----------
-def _build_prompt(question: str, context: str = "") -> str:
-    if not context:
-        return question
-    return (
-        "Answer the question using ONLY the provided context. "
-        "If the context does not contain the answer, say so explicitly.\n\n"
-        f"CONTEXT:\n{context}\n\n"
-        f"QUESTION: {question}\n\nANSWER:"
-    )
-
-
+# ---------- Claude (via TrollLLM) ----------
 def generate_with_claude(question: str, context: str = "") -> str:
     """Call Claude via TrollLLM API."""
     try:
-        prompt = _build_prompt(question, context)
-        
+        if context:
+            prompt = (
+                "You are a helpful academic assistant. Answer the question using ONLY "
+                "the provided context. If the context doesn't contain the answer, say so explicitly. "
+                "Cite the source document and page when relevant.\n\n"
+                f"CONTEXT:\n{context}\n\n"
+                f"QUESTION: {question}\n\nANSWER:"
+            )
+        else:
+            prompt = question
+
         headers = {
             "x-api-key": settings.ANTHROPIC_API_KEY,
             "anthropic-version": "2023-06-01",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Content-Type": "application/json",
         }
-        
+
         payload = {
             "model": settings.CLAUDE_MODEL,
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": prompt}]
+            "max_tokens": settings.CLAUDE_MAX_TOKENS,
+            "messages": [{"role": "user", "content": prompt}],
         }
-        
-        logger.info(f"Calling TrollLLM: {settings.ANTHROPIC_BASE_URL}/v1/messages")
-        logger.info(f"Model: {settings.CLAUDE_MODEL}")
-        logger.info(f"Payload: {payload}")
-        
-        with httpx.Client(timeout=15.0) as client:
+
+        with httpx.Client(timeout=30.0) as client:
             response = client.post(
-                f"{TROLLLLM_BASE_URL}/v1/messages",
+                f"{settings.ANTHROPIC_BASE_URL}/v1/messages",
                 json=payload,
-                headers=headers
+                headers=headers,
             )
-            
-            logger.info(f"Response status: {response.status_code}")
-            logger.info(f"Response body: {response.text[:500]}")
-        
+
         if response.status_code != 200:
-            raise RuntimeError(f"TrollLLM error ({response.status_code}): {response.text[:200]}")
-        
+            raise RuntimeError(f"Claude error ({response.status_code}): {response.text[:300]}")
+
         data = response.json()
         return data["content"][0]["text"]
-    
+
     except Exception as e:
-        logger.error(f"Claude call failed: {e}")
-        raise HTTPException(status_code=502, detail=f"Claude error: {e}") from e
+        logger.exception("Claude call failed")
+        raise HTTPException(status_code=502, detail=f"Claude error: {e}")
+
+
 # ---------- Health ----------
 @app.get("/")
 def root():
@@ -136,24 +141,20 @@ def health():
     }
 
 
-# ---------- Claude test ----------
 @app.post("/api/test-claude")
 def test_claude():
-    """Verify the Claude API key works end-to-end."""
+    """Verify Claude API connection."""
     try:
         text = generate_with_claude("Reply with exactly: OK")
-        return {
-            "success": True,
-            "model": settings.CLAUDE_MODEL,
-            "response": text.strip(),
-        }
+        return {"success": True, "model": settings.CLAUDE_MODEL, "response": text.strip()}
     except HTTPException as e:
         return {"success": False, "error": e.detail}
 
 
 # ---------- Documents ----------
 @app.post("/api/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Upload a document — saves to MinIO and queues ingest task."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
@@ -164,94 +165,228 @@ async def upload_document(file: UploadFile = File(...)):
             detail=f"File type .{ext} not allowed. Allowed: {settings.allowed_file_types}",
         )
 
-    dest = os.path.join(settings.UPLOAD_DIR, file.filename)
-    size_bytes = 0
+    # Read file content
+    file_content = await file.read()
+    size_bytes = len(file_content)
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
-    with open(dest, "wb") as f:
-        while chunk := await file.read(1024 * 1024):
-            size_bytes += len(chunk)
-            if size_bytes > max_bytes:
-                f.close()
-                os.remove(dest)
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File exceeds {settings.MAX_UPLOAD_SIZE_MB} MB",
-                )
-            f.write(chunk)
+    if size_bytes > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds {settings.MAX_UPLOAD_SIZE_MB} MB",
+        )
 
-    size_mb = round(size_bytes / (1024 * 1024), 2)
-    logger.info(f"Uploaded {file.filename} ({size_mb} MB)")
+    # 1. Upload to MinIO
+    try:
+        minio.upload_file(file.filename, file_content)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"MinIO upload failed: {e}")
+
+    # 2. Check if doc already exists in DB
+    existing = db.query(Document).filter(Document.filename == file.filename).first()
+    if existing:
+        # Reset for re-ingestion
+        existing.status = "pending"
+        existing.size_bytes = size_bytes
+        existing.error_message = None
+        existing.uploaded_at = datetime.now(timezone.utc)
+        doc = existing
+    else:
+        # 3. Create document record
+        doc = Document(
+            filename=file.filename,
+            size_bytes=size_bytes,
+            file_type=ext,
+            status="pending",
+        )
+        db.add(doc)
+
+    db.commit()
+    db.refresh(doc)
+
+    # 4. Queue Celery ingest task
+    try:
+        from worker.tasks.ingest import ingest_document
+        ingest_document.delay(file.filename, doc.id)
+        logger.info(f"Queued ingest task for: {file.filename}")
+    except Exception as e:
+        logger.warning(f"Could not queue Celery task (worker not running?): {e}")
 
     return {
         "success": True,
         "file": {
+            "id": doc.id,
             "name": file.filename,
-            "size_mb": size_mb,
+            "size_mb": round(size_bytes / (1024 * 1024), 2),
             "type": ext,
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            "status": doc.status,
+            "uploaded_at": doc.uploaded_at.isoformat(),
         },
+        "message": "File uploaded — processing in background",
     }
 
 
 @app.get("/api/documents")
-def list_documents():
-    if not os.path.isdir(settings.UPLOAD_DIR):
-        return {"total": 0, "documents": []}
-
-    docs = []
-    for name in sorted(os.listdir(settings.UPLOAD_DIR)):
-        path = os.path.join(settings.UPLOAD_DIR, name)
-        if not os.path.isfile(path) or name.startswith("."):
-            continue
-        stat = os.stat(path)
-        docs.append({
-            "name": name,
-            "size_mb": round(stat.st_size / (1024 * 1024), 2),
-            "type": name.rsplit(".", 1)[-1].lower() if "." in name else "",
-        })
-    return {"total": len(docs), "documents": docs}
+def list_documents(db: Session = Depends(get_db)):
+    """List all uploaded documents with their ingest status."""
+    docs = db.query(Document).order_by(Document.uploaded_at.desc()).all()
+    return {
+        "total": len(docs),
+        "documents": [
+            {
+                "id": d.id,
+                "name": d.filename,
+                "size_mb": round(d.size_bytes / (1024 * 1024), 2),
+                "type": d.file_type,
+                "status": d.status,
+                "chunks_count": d.chunks_count,
+                "error": d.error_message,
+                "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+                "processed_at": d.processed_at.isoformat() if d.processed_at else None,
+            }
+            for d in docs
+        ],
+    }
 
 
 @app.delete("/api/documents/{filename}")
-def delete_document(filename: str):
+def delete_document(filename: str, db: Session = Depends(get_db)):
+    """Delete a document from MinIO, PostgreSQL, and Qdrant."""
     if "/" in filename or "\\" in filename or filename.startswith("."):
         raise HTTPException(status_code=400, detail="Invalid filename")
 
-    path = os.path.join(settings.UPLOAD_DIR, filename)
-    if not os.path.isfile(path):
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
-    os.remove(path)
+    # Delete from all 3 storage backends
+    try:
+        minio.delete_file(filename)
+    except Exception as e:
+        logger.warning(f"MinIO delete failed: {e}")
+
+    try:
+        qdrant.delete_by_source(filename)
+    except Exception as e:
+        logger.warning(f"Qdrant delete failed: {e}")
+
+    db.delete(doc)
+    db.commit()
+
     return {"success": True, "deleted": filename}
 
 
-# ---------- Q&A ----------
+# ---------- RAG: Search ----------
+@app.post("/api/search")
+def search(req: SearchRequest):
+    """Semantic search over uploaded documents."""
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    try:
+        query_vector = embed_text(req.query)
+        results = qdrant.search_chunks(query_vector, top_k=req.top_k)
+    except Exception as e:
+        logger.exception("Search failed")
+        raise HTTPException(status_code=502, detail=f"Search failed: {e}")
+
+    return {
+        "query": req.query,
+        "total": len(results),
+        "results": results,
+    }
+
+
+# ---------- RAG: Ask (full pipeline) ----------
 @app.post("/api/ask")
-def ask(req: AskRequest):
+def ask(req: AskRequest, db: Session = Depends(get_db)):
+    """Full RAG pipeline: retrieve → build context → ask Claude → return answer + sources."""
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
-    answer = generate_with_claude(req.question)
+    # 1. Embed question
+    try:
+        query_vector = embed_text(req.question)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Embedding failed: {e}")
+
+    # 2. Retrieve top-k chunks from Qdrant
+    try:
+        chunks = qdrant.search_chunks(query_vector, top_k=req.top_k)
+    except Exception as e:
+        logger.exception("Retrieval failed")
+        chunks = []  # Fall back to no-context answer
+
+    # 3. Build context from chunks
+    if chunks:
+        context = "\n\n---\n\n".join([
+            f"[Source: {c['source']}, Page: {c['page']}]\n{c['text']}"
+            for c in chunks
+        ])
+    else:
+        context = ""
+
+    # 4. Generate answer with Claude
+    answer = generate_with_claude(req.question, context=context)
+
+    # 5. Format sources
+    sources = [
+        {
+            "file": c["source"],
+            "page": c["page"],
+            "chunk_index": c["chunk_index"],
+            "relevance_score": round(c["score"], 3),
+            "preview": c["text"][:200] + "..." if len(c["text"]) > 200 else c["text"],
+        }
+        for c in chunks
+    ]
+
+    # 6. Save conversation to DB
+    try:
+        conv = Conversation(
+            question=req.question,
+            answer=answer,
+            sources=json.dumps(sources),
+            model_used=settings.CLAUDE_MODEL,
+        )
+        db.add(conv)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Could not save conversation: {e}")
 
     return {
         "question": req.question,
         "answer": answer,
+        "sources": sources,
         "model": settings.CLAUDE_MODEL,
-        "sources": [],
+        "context_used": bool(chunks),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
-@app.post("/api/search")
-def search(req: SearchRequest):
-    if not req.query.strip():
-        raise HTTPException(status_code=400, detail="Query cannot be empty")
-
+# ---------- Conversations ----------
+@app.get("/api/conversations")
+def list_conversations(limit: int = 20, db: Session = Depends(get_db)):
+    """List recent Q&A history."""
+    convs = (
+        db.query(Conversation)
+        .order_by(Conversation.created_at.desc())
+        .limit(limit)
+        .all()
+    )
     return {
-        "query": req.query,
-        "results": [],
-        "note": "Vector search arrives in Phase 2",
+        "total": len(convs),
+        "conversations": [
+            {
+                "id": c.id,
+                "question": c.question,
+                "answer": c.answer,
+                "sources": json.loads(c.sources) if c.sources else [],
+                "model": c.model_used,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in convs
+        ],
     }
 
 
