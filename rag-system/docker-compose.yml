@@ -1,13 +1,17 @@
 version: '3.8'
 
+# RAG Academic Search - Full Stack
+# 8 services: nginx, frontend-user, frontend-admin, backend, worker, postgres, qdrant, minio, redis
+
 services:
+  # ==================== Storage Layer ====================
   postgres:
     image: postgres:15-alpine
     container_name: rag-postgres
     environment:
-      POSTGRES_USER: raguser
-      POSTGRES_PASSWORD: ragpass
-      POSTGRES_DB: rag_db
+      POSTGRES_USER: ${POSTGRES_USER:-raguser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragpass}
+      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
     ports:
       - "5432:5432"
     volumes:
@@ -16,7 +20,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U raguser -d rag_db"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -32,18 +36,18 @@ services:
     container_name: rag-minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
     ports:
-      - "9000:9000"     # API
-      - "9001:9001"     # Web console
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio_data:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -56,7 +60,104 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+
+  # ==================== Application Layer ====================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: ${DOCKER_USER:-yourusername}/rag-backend:latest
+    container_name: rag-backend
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://chat.trollllm.xyz}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpass}@postgres:5432/${POSTGRES_DB:-rag_db}
+      QDRANT_URL: http://qdrant:6333
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      ENVIRONMENT: production
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: ${DOCKER_USER:-yourusername}/rag-worker:latest
+    container_name: rag-worker
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://chat.trollllm.xyz}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpass}@postgres:5432/${POSTGRES_DB:-rag_db}
+      QDRANT_URL: http://qdrant:6333
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on:
+      - postgres
+      - minio
+      - redis
+      - qdrant
+
+  # ==================== Frontend Layer ====================
+  frontend-user:
+    build:
+      context: ./frontend-user
+      dockerfile: Dockerfile
+    image: ${DOCKER_USER:-yourusername}/rag-frontend-user:latest
+    container_name: rag-frontend-user
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  frontend-admin:
+    build:
+      context: ./frontend-admin
+      dockerfile: Dockerfile
+    image: ${DOCKER_USER:-yourusername}/rag-frontend-admin:latest
+    container_name: rag-frontend-admin
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3001:3001"
+    depends_on:
+      - backend
+
+  # ==================== Load Balancer ====================
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    image: ${DOCKER_USER:-yourusername}/rag-nginx:latest
+    container_name: rag-nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+      - frontend-user
+      - frontend-admin
 
 volumes:
   postgres_data:
