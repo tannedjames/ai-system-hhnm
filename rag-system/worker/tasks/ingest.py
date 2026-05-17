@@ -104,7 +104,14 @@ def ingest_document(self, filename: str, doc_id: int):
         logger.info(f"[{filename}] Saving to Qdrant...")
         qdrant.upsert_chunks(chunks, vectors)
 
-        # 6. Mark as completed
+        # 6. Invalidate BM25 cache so new chunks are keyword-searchable
+        try:
+            from backend.bm25_search import invalidate_cache
+            invalidate_cache()
+        except Exception as e:
+            logger.warning(f"[{filename}] BM25 cache invalidation failed: {e}")
+
+        # 7. Mark as completed
         _update_status(db, doc_id, "completed", chunks_count=len(chunks))
         logger.info(f"[{filename}] Ingest complete: {len(chunks)} chunks indexed")
 

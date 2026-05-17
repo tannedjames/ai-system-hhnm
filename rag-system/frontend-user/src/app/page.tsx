@@ -141,7 +141,7 @@ export default function ChatPage() {
                               📄 {src.file} {src.page > 0 && `· page ${src.page}`}
                             </span>
                             <span className="text-gray-500">
-                              {(src.relevance_score * 100).toFixed(0)}% match
+                              {(Math.max(0, Math.min(1, src.relevance_score)) * 100).toFixed(0)}% match
                             </span>
                           </div>
                           <p className="text-gray-600 italic">{src.preview}</p>

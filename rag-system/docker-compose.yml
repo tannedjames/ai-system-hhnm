@@ -67,7 +67,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    image: ${DOCKER_USER:-yourusername}/rag-backend:latest
+    image: ${DOCKER_USER:-mrra7}/rag-backend:latest
     container_name: rag-backend
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -98,7 +98,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    image: ${DOCKER_USER:-yourusername}/rag-worker:latest
+    image: ${DOCKER_USER:-mrra7}/rag-worker:latest
     container_name: rag-worker
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -123,7 +123,7 @@ services:
     build:
       context: ./frontend-user
       dockerfile: Dockerfile
-    image: ${DOCKER_USER:-yourusername}/rag-frontend-user:latest
+    image: ${DOCKER_USER:-mrra7}/rag-frontend-user:latest
     container_name: rag-frontend-user
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
@@ -136,7 +136,7 @@ services:
     build:
       context: ./frontend-admin
       dockerfile: Dockerfile
-    image: ${DOCKER_USER:-yourusername}/rag-frontend-admin:latest
+    image: ${DOCKER_USER:-mrra7}/rag-frontend-admin:latest
     container_name: rag-frontend-admin
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
@@ -150,7 +150,7 @@ services:
     build:
       context: ./nginx
       dockerfile: Dockerfile
-    image: ${DOCKER_USER:-yourusername}/rag-nginx:latest
+    image: ${DOCKER_USER:-mrra7}/rag-nginx:latest
     container_name: rag-nginx
     ports:
       - "80:80"
@@ -164,3 +164,4 @@ volumes:
   qdrant_data:
   minio_data:
   redis_data:
+

@@ -42,6 +42,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
         logger.warning("Some services may not be available - check Docker Compose")
+    
+     # Pre-load embedding model at startup
+    logger.info("Pre-loading embedding model...")
+    from backend.rag_embedding import _get_model
+    _get_model()
 
     yield
     logger.info("Shutting down RAG backend")
@@ -266,9 +271,10 @@ def delete_document(filename: str, db: Session = Depends(get_db)):
         logger.warning(f"MinIO delete failed: {e}")
 
     try:
-        qdrant.delete_by_source(filename)
+        from backend.bm25_search import invalidate_cache
+        invalidate_cache()
     except Exception as e:
-        logger.warning(f"Qdrant delete failed: {e}")
+        logger.warning(f"BM25 cache invalidation failed: {e}")
 
     db.delete(doc)
     db.commit()
@@ -284,8 +290,9 @@ def search(req: SearchRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
     try:
+        from backend.hybrid_search import hybrid_search
         query_vector = embed_text(req.query)
-        results = qdrant.search_chunks(query_vector, top_k=req.top_k)
+        results = hybrid_search(req.query, query_vector, top_k=req.top_k)
     except Exception as e:
         logger.exception("Search failed")
         raise HTTPException(status_code=502, detail=f"Search failed: {e}")
@@ -310,9 +317,10 @@ def ask(req: AskRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Embedding failed: {e}")
 
-    # 2. Retrieve top-k chunks from Qdrant
+    # 2. Hybrid retrieve: dense + sparse → RRF → rerank
     try:
-        chunks = qdrant.search_chunks(query_vector, top_k=req.top_k)
+        from backend.hybrid_search import hybrid_search
+        chunks = hybrid_search(req.question, query_vector, top_k=req.top_k)
     except Exception as e:
         logger.exception("Retrieval failed")
         chunks = []  # Fall back to no-context answer
