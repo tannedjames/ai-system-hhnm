@@ -1,24 +1,71 @@
-"""Hybrid retrieval: dense + sparse → RRF fusion → cross-encoder rerank.
+"""Hybrid retrieval: dense + sparse -> RRF fusion -> cross-encoder rerank.
 
-Pipeline (matches the assignment diagram):
+Pipeline:
 
     query
-      ├─ dense search  (Qdrant)        → list A
-      └─ sparse search (BM25)          → list B
-              │
-              ▼
-        RRF fusion (combine A + B)     → fused list
-              │
-              ▼
-        cross-encoder rerank           → final top-k
+      | dense search  (Qdrant, semantic)   -> list A
+      | sparse search (BM25, keyword)      -> list B
+              |
+              v
+        RRF fusion (combine A + B)          -> fused list
+              |
+              v
+        cross-encoder rerank                -> reranked candidates
+              |
+              v
+        per-document diversification        -> final top-k
+
+Notes
+-----
+* For broad / synthesis questions ("summarize", "what's the main topic",
+  "overview of...") we widen the candidate pool and the final top_k so the
+  LLM sees a representative cross-section of the corpus rather than five
+  near-duplicate chunks from a single section.
+* The reranker is a multilingual cross-encoder so Vietnamese-language docs
+  aren't unfairly demoted by an English-only model.
+* Relevance scores returned to the API are sigmoid-of-logit, the standard
+  interpretation for ms-marco-style cross-encoder outputs.
 """
 import logging
-from typing import List, Dict, Any, Optional
+import math
+import re
+from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
 # Lazy-loaded cross-encoder
 _reranker = None
+_reranker_failed = False
+
+# Recognising broad/synthesis-style questions in English and Vietnamese.
+_BROAD_QUERY_PATTERNS = re.compile(
+    r"\b("
+    r"summari[sz]e|summary|overview|outline|main\s+(topic|idea|theme|point)s?|"
+    r"key\s+(point|takeaway|idea|theme)s?|overall|in\s+general|"
+    r"what\s+is\s+(this|the\s+document|the\s+paper|the\s+book)\s+about|"
+    r"compare|contrast|differences?|similarities|across|throughout|"
+    r"list\s+(all|the)|all\s+the|every|each\s+chapter|"
+    r"tom\s*tat|tong\s*quan|chu\s*de\s*chinh|y\s*chinh|"
+    r"noi\s*dung\s*chinh|liet\s*ke|so\s*sanh|tong\s*hop|"
+    r"tóm\s*tắt|tổng\s*quan|chủ\s*đề\s*chính|ý\s*chính|"
+    r"nội\s*dung\s*chính|liệt\s*kê|so\s*sánh|tổng\s*hợp"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_broad(query: str) -> bool:
+    """Heuristic: does this question require synthesis across the whole corpus?"""
+    if not query:
+        return False
+    if _BROAD_QUERY_PATTERNS.search(query):
+        return True
+    words = query.split()
+    if len(words) <= 3 and any(
+        w.lower() in {"summary", "overview", "topic", "topics"} for w in words
+    ):
+        return True
+    return False
 
 
 def _chunk_key(c: Dict[str, Any]) -> str:
@@ -31,15 +78,7 @@ def reciprocal_rank_fusion(
     sparse: List[Dict[str, Any]],
     k: int = 60,
 ) -> List[Dict[str, Any]]:
-    """
-    Combine two ranked lists using Reciprocal Rank Fusion.
-
-    RRF score for a doc = sum over each list of 1 / (k + rank).
-    k=60 is the value from the original RRF paper; it dampens the
-    influence of any single list's top results.
-
-    Returns a single list sorted by fused score (desc).
-    """
+    """Combine two ranked lists using Reciprocal Rank Fusion."""
     scores: Dict[str, float] = {}
     chunk_by_key: Dict[str, Dict[str, Any]] = {}
 
@@ -47,7 +86,6 @@ def reciprocal_rank_fusion(
         for rank, chunk in enumerate(ranked_list):
             key = _chunk_key(chunk)
             scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
-            # Keep the first occurrence (they're identical payloads anyway)
             if key not in chunk_by_key:
                 chunk_by_key[key] = chunk
 
@@ -56,100 +94,148 @@ def reciprocal_rank_fusion(
         c = dict(chunk_by_key[key])
         c["rrf_score"] = round(score, 6)
         fused.append(c)
-
     return fused
 
 
 def _get_reranker():
-    """Load the cross-encoder model on first use."""
-    global _reranker
-    if _reranker is None:
+    """Load the multilingual cross-encoder on first use."""
+    global _reranker, _reranker_failed
+    if _reranker is not None or _reranker_failed:
+        return _reranker
+
+    try:
         from sentence_transformers import CrossEncoder
-        # Small, fast, multilingual-friendly cross-encoder
-        model_name = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-        logger.info(f"Loading cross-encoder: {model_name}")
-        _reranker = CrossEncoder(model_name, max_length=512)
-        logger.info("Cross-encoder loaded")
-    return _reranker
+    except Exception as e:
+        logger.warning(f"sentence_transformers not available: {e}")
+        _reranker_failed = True
+        return None
+
+    candidates = [
+        "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    ]
+    try:
+        from backend.config import settings
+        if "multilingual" in (settings.EMBEDDING_MODEL or "").lower():
+            candidates = [
+                "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+                "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            ]
+    except Exception:
+        pass
+
+    for name in candidates:
+        try:
+            logger.info(f"Loading cross-encoder: {name}")
+            _reranker = CrossEncoder(name, max_length=512)
+            logger.info(f"Cross-encoder loaded: {name}")
+            return _reranker
+        except Exception as e:
+            logger.warning(f"Reranker {name} failed to load: {e}")
+
+    _reranker_failed = True
+    return None
+
+
+def _sigmoid(x: float) -> float:
+    """Sigmoid clipped to avoid overflow on extreme cross-encoder logits."""
+    x = max(min(x, 50.0), -50.0)
+    return 1.0 / (1.0 + math.exp(-x))
 
 
 def rerank(
     query: str,
     chunks: List[Dict[str, Any]],
-    top_k: int = 5,
+    top_k: int = 10,
 ) -> List[Dict[str, Any]]:
-    """
-    Re-score chunks with a cross-encoder (query, chunk_text) and return top_k.
-
-    A cross-encoder reads the query and the chunk *together*, so it's much
-    more accurate than the bi-encoder used for initial retrieval — but too
-    slow to run over the whole corpus, which is why we only rerank the
-    fused candidates.
-    """
+    """Re-score chunks with a cross-encoder and return the top_k."""
     if not chunks:
         return []
 
-    try:
-        model = _get_reranker()
-    except Exception as e:
-        logger.warning(f"Reranker unavailable, skipping rerank: {e}")
+    model = _get_reranker()
+    if model is None:
+        logger.warning("No reranker available, returning fused order")
         return chunks[:top_k]
 
-    pairs = [[query, c["text"]] for c in chunks]
-    scores = model.predict(pairs)
-    scores = [float(x) for x in scores]
+    try:
+        pairs = [[query, c["text"]] for c in chunks]
+        raw_scores = model.predict(pairs)
+        scores = [float(x) for x in raw_scores]
+    except Exception as e:
+        logger.warning(f"Rerank prediction failed, falling back to fused order: {e}")
+        return chunks[:top_k]
 
-    
-    import math
-
-    # Softmax -> probabilities in 0..1 (top won't necessarily be 1.0)
-    max_score = max(scores) if scores else 0.0
-    exp_scores = [math.exp(s - max_score) for s in scores]
-    sum_exp = sum(exp_scores) if exp_scores else 1.0
-
-    for c, s_raw, p in zip(chunks, scores, [(e / sum_exp) for e in exp_scores]):
-        c["rerank_score"] = s_raw
-        c["rerank_score_norm"] = float(p)  # 0..1
+    for c, raw in zip(chunks, scores):
+        c["rerank_score"] = raw
+        c["rerank_score_norm"] = _sigmoid(raw)
 
     reranked = sorted(chunks, key=lambda c: c["rerank_score"], reverse=True)
     return reranked[:top_k]
+
+
+def _diversify_by_source(
+    chunks: List[Dict[str, Any]],
+    top_k: int,
+    per_source_cap: int,
+) -> List[Dict[str, Any]]:
+    """Re-order chunks so the top_k spans multiple source documents."""
+    if per_source_cap <= 0 or len(chunks) <= top_k:
+        return chunks[:top_k]
+
+    picked: List[Dict[str, Any]] = []
+    per_source_count: Dict[str, int] = {}
+    leftover: List[Dict[str, Any]] = []
+
+    for c in chunks:
+        src = c.get("source", "unknown")
+        if per_source_count.get(src, 0) < per_source_cap:
+            picked.append(c)
+            per_source_count[src] = per_source_count.get(src, 0) + 1
+            if len(picked) >= top_k:
+                return picked
+        else:
+            leftover.append(c)
+
+    for c in leftover:
+        if len(picked) >= top_k:
+            break
+        picked.append(c)
+    return picked
 
 
 def hybrid_search(
     query: str,
     query_vector: List[float],
     top_k: int = 5,
-    candidate_k: int = 10,
+    candidate_k: int = None,
     use_rerank: bool = True,
 ) -> List[Dict[str, Any]]:
-    """
-    Full hybrid retrieval.
-
-    Args:
-        query: raw user question (for BM25 + reranker)
-        query_vector: embedded question (for dense search)
-        top_k: how many final results to return
-        candidate_k: how many to pull from each retriever before fusion
-        use_rerank: if False, skip the cross-encoder (faster)
-
-    Returns final ranked chunks with keys:
-        text, source, page, chunk_index, score,
-        rrf_score, (rerank_score if reranked)
-    """
-    # Import here to avoid circular imports at module load
+    """Full hybrid retrieval."""
     from backend.storage import qdrant_client as qdrant
     from backend.bm25_search import search_bm25
 
-    # 1. Dense (semantic) search
+    is_broad = _looks_broad(query)
+
+    if is_broad:
+        effective_top_k = max(top_k, 12)
+        effective_candidate_k = candidate_k if candidate_k is not None else 60
+    else:
+        effective_top_k = top_k
+        effective_candidate_k = candidate_k if candidate_k is not None else max(30, top_k * 5)
+
+    logger.info(
+        f"hybrid_search: broad={is_broad} top_k={effective_top_k} "
+        f"candidate_k={effective_candidate_k}"
+    )
+
     try:
-        dense = qdrant.search_chunks(query_vector, top_k=candidate_k)
+        dense = qdrant.search_chunks(query_vector, top_k=effective_candidate_k)
     except Exception as e:
         logger.warning(f"Dense search failed: {e}")
         dense = []
 
-    # 2. Sparse (keyword) search
     try:
-        sparse = search_bm25(query, top_k=candidate_k)
+        sparse = search_bm25(query, top_k=effective_candidate_k)
     except Exception as e:
         logger.warning(f"Sparse search failed: {e}")
         sparse = []
@@ -157,18 +243,23 @@ def hybrid_search(
     if not dense and not sparse:
         return []
 
-    # 3. RRF fusion
     fused = reciprocal_rank_fusion(dense, sparse)
 
-    # 4. Cross-encoder rerank (optional)
+    rerank_pool = min(len(fused), max(effective_top_k * 3, 30))
     if use_rerank:
-        final = rerank(query, fused, top_k=top_k)
+        reranked = rerank(query, fused[:rerank_pool], top_k=rerank_pool)
     else:
-        final = fused[:top_k]
+        reranked = fused[:rerank_pool]
 
-    # Normalize a "score" field for the API response
-    
+    unique_sources = {c.get("source", "unknown") for c in reranked}
+    if is_broad and len(unique_sources) > 1:
+        per_source_cap = max(2, effective_top_k // max(1, len(unique_sources)) + 1)
+    else:
+        per_source_cap = max(2, effective_top_k // 2 + 1)
+
+    final = _diversify_by_source(reranked, effective_top_k, per_source_cap)
+
     for c in final:
-       c["score"] = c.get("rerank_score_norm", c.get("rrf_score", 0.0))
+        c["score"] = c.get("rerank_score_norm", c.get("rrf_score", 0.0))
 
     return final

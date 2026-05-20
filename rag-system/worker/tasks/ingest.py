@@ -100,7 +100,13 @@ def ingest_document(self, filename: str, doc_id: int):
         texts = [c["text"] for c in chunks]
         vectors = embed_batch(texts)
 
-        # 5. Upsert to Qdrant
+        # 5. Upsert to Qdrant — first delete any prior chunks for this source so the
+        # new chunk set fully replaces the old one (handles re-ingest where the new
+        # version has fewer chunks than the old one).
+        try:
+            qdrant.delete_by_source(filename)
+        except Exception as e:
+            logger.warning(f"[{filename}] Pre-upsert cleanup failed (continuing): {e}")
         logger.info(f"[{filename}] Saving to Qdrant...")
         qdrant.upsert_chunks(chunks, vectors)
 

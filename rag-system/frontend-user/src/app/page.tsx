@@ -7,9 +7,16 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 interface Source {
   file: string;
   page: number;
+  page_end?: number;
   chunk_index: number;
   relevance_score: number;
   preview: string;
+}
+
+function pageLabel(src: Source): string {
+  if (!src.page) return '';
+  if (src.page_end && src.page_end !== src.page) return `pp. ${src.page}–${src.page_end}`;
+  return `p. ${src.page}`;
 }
 
 interface Message {
@@ -59,7 +66,8 @@ export default function ChatPage() {
       const res = await fetch(`${API_URL}/api/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, top_k: 5 }),
+        // Note: backend auto-widens top_k for broad/synthesis questions ("summarize", etc).
+        body: JSON.stringify({ question, top_k: 8 }),
       });
 
       const data = await res.json();
@@ -138,7 +146,7 @@ export default function ChatPage() {
                         <div key={i} className="text-xs bg-gray-50 rounded p-2">
                           <div className="flex justify-between items-start mb-1">
                             <span className="font-medium text-gray-900">
-                              📄 {src.file} {src.page > 0 && `· page ${src.page}`}
+                              📄 {src.file} {src.page > 0 && `· ${pageLabel(src)}`}
                             </span>
                             <span className="text-gray-500">
                               {(Math.max(0, Math.min(1, src.relevance_score)) * 100).toFixed(0)}% match
