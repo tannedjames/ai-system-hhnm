@@ -1,32 +1,36 @@
-# RAG Academic Search System
+# Hệ Thống Tìm Kiếm Tài Liệu Học Thuật RAG
 
-A production-grade Retrieval-Augmented Generation (RAG) system for searching and answering questions about academic documents. Built with FastAPI, Next.js, PostgreSQL, Qdrant, and Claude.
+Hệ thống Retrieval-Augmented Generation (RAG) dùng để tìm kiếm và trả lời câu hỏi về tài liệu học thuật. Xây dựng bằng FastAPI, Next.js, PostgreSQL, Qdrant, MinIO, Redis và Claude.
 
-**Status:** Phase 4 complete — full hybrid retrieval (dense + sparse + rerank) with web frontends and Docker orchestration.
+**Trạng thái:** Hoàn thành Phase 4 — truy xuất lai hoàn chỉnh (dense + sparse + rerank), xử lý câu hỏi tổng hợp, đa ngôn ngữ (Anh + Việt), xóa tài liệu cascade đầy đủ, điều phối bằng Docker.
 
 ---
 
-## 📋 Table of Contents
+## Mục Lục
 
-- [Quick Start](#quick-start)
-- [Architecture](#architecture)
-- [Services & Ports](#services--ports)
-- [Usage](#usage)
+- [Bắt Đầu Nhanh](#bắt-đầu-nhanh)
+- [Kiến Trúc](#kiến-trúc)
+- [Cấu Trúc Repo](#cấu-trúc-repo)
+- [Dịch Vụ & Cổng](#dịch-vụ--cổng)
+- [Sử Dụng](#sử-dụng)
+- [Tính Năng Chính](#tính-năng-chính)
 - [Tech Stack](#tech-stack)
-- [Environment Variables](#environment-variables)
-- [Development](#development)
-- [Team](#team)
+- [Biến Môi Trường](#biến-môi-trường)
+- [Phát Triển](#phát-triển)
+- [Triển Khai](#triển-khai)
+- [Khắc Phục Sự Cố](#khắc-phục-sự-cố)
+- [Đội Ngũ](#đội-ngũ)
 
 ---
 
-## Quick Start
+## Bắt Đầu Nhanh
 
-### Prerequisites
-- Docker Desktop (installed and running)
-- 4 GB RAM allocated to Docker
-- Your TrollLLM/Claude API key
+### Yêu Cầu
+- Docker Desktop (đã cài và đang chạy)
+- 4 GB RAM cấp cho Docker (khuyến nghị 8 GB nếu ingest nặng)
+- API key TrollLLM/Claude của bạn
 
-### 1. Clone & Setup
+### 1. Clone & Chuẩn bị
 
 ```bash
 git clone <repo-url>
@@ -34,326 +38,302 @@ cd rag-system
 cp .env.example .env
 ```
 
-### 2. Add your API key to `.env`
+### 2. Thêm API key vào `.env`
 
 ```bash
 ANTHROPIC_API_KEY=sk-trollllm-your-key-here
 ```
 
-### 3. Start everything
+### 3. Khởi động toàn bộ hệ thống
 
 ```bash
 docker compose up -d --build
 ```
 
-Wait 5-10 minutes on first run (builds Next.js apps, pulls images, initializes DBs).
+Lần đầu chạy mất 5–10 phút (build Next.js apps, pull images, init DB, tải embedding + reranker model).
 
-### 4. Verify all services are running
+### 4. Kiểm tra các dịch vụ đang chạy
 
 ```bash
 docker compose ps
 ```
 
-All 8 containers should show `running` or `healthy`.
+Tất cả 8 container phải hiện `running` hoặc `healthy`.
 
-### 5. Open the UIs
+### 5. Mở giao diện
 
-- **User chat:** http://localhost (or http://localhost:3000)
-- **Admin panel:** http://localhost/admin (or http://localhost:3001)
-- **API docs:** http://localhost/docs (or http://localhost:8000/docs)
-- **MinIO console:** http://localhost:9001 (login: `minioadmin` / `minioadmin`)
+- **Chat người dùng:** http://localhost (hoặc http://localhost:3000)
+- **Trang admin:** http://localhost/admin (hoặc http://localhost:3001)
+- **API docs:** http://localhost/docs (hoặc http://localhost:8000/docs)
+- **MinIO console:** http://localhost:9001 (đăng nhập: `minioadmin` / `minioadmin`)
 - **Qdrant dashboard:** http://localhost:6333/dashboard
 
 ---
 
-## Directory Structure
+## Kiến Trúc
 
 ```
-rag-system/
-│
-├── docker-compose.yml              # Orchestrates all 8 services
-├── .env                            # Configuration (API keys, DB creds) — DO NOT COMMIT
-├── .env.example                    # Safe template for .env
-├── .gitignore                      # Protects .env and secrets
-├── README.md                       # This file
-│
-├── Dockerfile.backend              # Python 3.11 + FastAPI
-├── Dockerfile.worker               # Python 3.11 + Celery
-│
-├── requirements.txt                # Python dependencies
-│
-├── backend/                        # FastAPI + RAG logic
-│   ├── __init__.py
-│   ├── config.py                   # Settings from .env
-│   ├── main.py                     # Routes: /api/ask, /api/search, /api/documents
-│   │
-│   ├── models/
-│   │   └── __init__.py             # SQLAlchemy: Document, Conversation tables
-│   │
-│   ├── storage/
-│   │   ├── __init__.py
-│   │   ├── database.py             # PostgreSQL session management
-                        ┌─────────────────────┐
-                        │   Nginx (port 80)   │
-                        │  Load Balancer      │
-                        └────┬────┬────┬──────┘
-                             │    │    │
-                ┌────────────┘    │    └──────────────┐
-                │                 │                    │
-      ┌─────────▼────────┐   ┌────▼──────────┐  ┌────▼─────────┐
-      │  Frontend User   │   │   Frontend    │  │   Backend    │
-      │  (port 3000)     │   │    Admin      │  │  (port 8000) │
-      │  Next.js         │   │  (port 3001)  │  │   FastAPI    │
-      │  Chat UI         │   │  Next.js      │  │   RAG logic  │
-      │  + sources       │   │  Upload & mgmt│  │              │
-      └──────────────────┘   └───────────────┘  └────┬─────────┘
-                                                      │
-      ┌──────────────────────────────────────────────┼──────────────────┐
-      │                                              │                  │
-   ┌──▼──────────┐  ┌──────────┐  ┌─────────────┐  ┌─▼──────┐  ┌───────▼──┐
-   │ PostgreSQL  │  │ Qdrant   │  │ MinIO       │  │ Redis  │  │  Worker  │
-   │ (port 5432) │  │ (port    │  │ (port 9000) │  │ (port  │  │ (Celery) │
-   │             │  │  6333)   │  │             │  │ 6379)  │  │          │
-   │ - Users     │  │          │  │ - Documents │  │        │  │ Extract  │
-   │ - Documents │  │ Vectors  │  │ - PDFs/TXT  │  │ Queue  │  │ Chunk    │
-   │ - Chats     │  │ Chunks   │  │   storage   │  │ & cache│  │ Embed    │
-   └─────────────┘  └──────────┘  └─────────────┘  └────────┘  └──────────┘
+                    ┌─────────────────────┐
+                    │   Nginx (cổng 80)   │
+                    │   Reverse proxy     │
+                    └────┬────┬────┬──────┘
+                         │    │    │
+            ┌────────────┘    │    └──────────────┐
+            │                 │                    │
+  ┌─────────▼────────┐   ┌────▼──────────┐  ┌────▼─────────┐
+  │  Frontend User   │   │   Frontend    │  │   Backend    │
+  │  (cổng 3000)     │   │    Admin      │  │  (cổng 8000) │
+  │  Next.js         │   │  (cổng 3001)  │  │   FastAPI    │
+  │  Giao diện chat  │   │  Next.js      │  │   Logic RAG  │
+  │  + trích dẫn     │   │  Upload & QL  │  │              │
+  └──────────────────┘   └───────────────┘  └────┬─────────┘
+                                                  │
+  ┌──────────────────────────────────────────────┼──────────────────┐
+  │                                              │                  │
+┌─▼──────────┐  ┌──────────┐  ┌─────────────┐  ┌─▼──────┐  ┌────────▼─┐
+│ PostgreSQL │  │ Qdrant   │  │   MinIO     │  │ Redis  │  │  Worker  │
+│ (cổng 5432)│  │ (6333)   │  │ (cổng 9000) │  │ (6379) │  │ (Celery) │
+│            │  │          │  │             │  │        │  │          │
+│ Metadata   │  │ Vector   │  │ File gốc    │  │ Queue  │  │ Extract  │
+│ Lịch sử    │  │ Chunks   │  │             │  │ + cache│  │ Chunk    │
+└────────────┘  └──────────┘  └─────────────┘  └────────┘  │ Embed    │
+                                                            └──────────┘
 ```
 
-### Pipeline Flow
+### Luồng Pipeline
 
-**Ingest (Background)**
+**Ingest (chạy nền, qua Celery worker)**
 ```
-Admin uploads file
+Admin upload file
     ↓
-Backend saves to MinIO + PostgreSQL
+Backend lưu vào MinIO + tạo hàng PostgreSQL
     ↓
-Celery task queued (Redis)
+Task Celery vào hàng đợi (Redis)
     ↓
-Worker: extract text → chunk → embed → upsert Qdrant
+Worker: trích văn bản → chia chunk theo câu → embed → upsert Qdrant
     ↓
-Status: pending → processing → completed
+Trạng thái: pending → processing → completed
 ```
 
-**Query (Real-time)**
+**Query (thời gian thực)**
 ```
-User asks question
+Người dùng đặt câu hỏi
     ↓
-Backend embeds question
+Backend embed câu hỏi (multilingual MiniLM)
     ↓
-Hybrid retrieval:
-    ├─ Dense search (Qdrant)
-    └─ Sparse search (BM25)
+Truy xuất lai (song song):
+    ├─ Dense search (Qdrant — vector similarity)
+    └─ Sparse search (BM25 — từ khóa)
     ↓
-RRF fusion (combine results)
+RRF fusion (Reciprocal Rank Fusion)
     ↓
-Cross-encoder rerank
+Rerank bằng cross-encoder (đa ngôn ngữ)
     ↓
-LLM generation with context
+Nếu là câu hỏi tổng hợp/khái quát:
+    → mở rộng top_k, candidate pool lớn hơn, đa dạng hóa theo nguồn
     ↓
-Answer + source citations
+Gửi chunks + câu hỏi tới Claude (qua proxy TrollLLM)
+    ↓
+Câu trả lời + trích dẫn nguồn → frontend
 ```
 
 ---
 
-## Repository Structure
+## Cấu Trúc Repo
 
 ```
 rag-system/
-├── .git/                          # Git repository
-├── .gitignore                     # Ignore .env, node_modules, __pycache__, etc.
-├── .env                           # Local config (NOT in git)
-├── .env.example                   # Template for .env (in git)
+├── .git/
+├── .gitignore                     # Bỏ qua .env, node_modules, __pycache__, v.v.
+├── .env                           # Cấu hình local (KHÔNG commit)
+├── .env.example                   # Template cho .env (có commit)
 │
-├── docker-compose.yml             # Orchestrate all 8 services
-├── Dockerfile.backend             # Backend service image
-├── Dockerfile.worker              # Worker service image
+├── docker-compose.yml             # Điều phối 8 dịch vụ
+├── Dockerfile.backend             # Image Python 3.11 + FastAPI
+├── Dockerfile.worker              # Image Python 3.11 + Celery
 │
-├── README.md                       # This file
-├── LICENSE                        # MIT License
-│
-├── requirements.txt               # Python dependencies (backend + worker)
+├── README.md                      # File này
+├── LICENSE                        # MIT
+├── requirements.txt               # Python deps (backend + worker)
 │
 ├── backend/                       # FastAPI application
 │   ├── __init__.py
-│   ├── config.py                  # Settings from .env
-│   ├── main.py                    # API routes, health checks
-│   ├── rag_embedding.py           # sentence-transformers local embeddings
-│   ├── rag_chunking.py            # Text chunking with overlap
-│   ├── rag_extraction.py          # Extract text from PDF/DOCX/TXT/MD
-│   ├── bm25_search.py             # BM25 sparse keyword search
-│   ├── hybrid_search.py           # Dense + sparse fusion + reranking
+│   ├── config.py                  # Pydantic settings đọc từ .env
+│   ├── main.py                    # REST routes: /api/ask, /api/search, /api/documents/*
+│   ├── rag_embedding.py           # sentence-transformers embedding local
+│   ├── rag_chunking.py            # Chunking theo câu, có map page
+│   ├── rag_extraction.py          # Trích text từ PDF/DOCX/TXT/MD
+│   ├── bm25_search.py             # BM25 keyword search + cache signature
+│   ├── hybrid_search.py           # Dense + sparse fusion + rerank + xử lý câu hỏi tổng hợp
 │   ├── models/
-│   │   └── __init__.py            # SQLAlchemy ORM models (Document, Conversation)
+│   │   └── __init__.py            # SQLAlchemy: bảng Document, Conversation
 │   └── storage/
 │       ├── __init__.py
-│       ├── database.py            # PostgreSQL session management
-│       ├── qdrant_client.py       # Vector database operations
-│       └── minio_client.py        # Object storage operations
+│       ├── database.py            # Engine + session PostgreSQL
+│       ├── qdrant_client.py       # Thao tác vector DB (có payload index)
+│       └── minio_client.py        # Object storage tương thích S3
 │
-├── worker/                        # Celery background task processor
+├── worker/                        # Celery xử lý nền
 │   ├── __init__.py
 │   └── tasks/
 │       ├── __init__.py
-│       └── ingest.py              # Document ingest pipeline (extract → chunk → embed → store)
+│       └── ingest.py              # extract → chunk → embed → upsert (idempotent)
 │
-├── frontend-user/                 # User chat interface (Next.js)
+├── frontend-user/                 # UI chat sinh viên (Next.js)
 │   ├── Dockerfile
-│   ├── .dockerignore
 │   ├── package.json
 │   ├── next.config.js
 │   ├── tsconfig.json
 │   ├── tailwind.config.js
-│   ├── postcss.config.js
-│   ├── node_modules/              # (generated on build)
-│   ├── .next/                     # (generated on build)
-│   └── src/
-│       └── app/
-│           ├── globals.css        # Tailwind + global styles
-│           ├── layout.tsx         # Root layout
-│           └── page.tsx           # Chat UI (question input, response display, sources)
+│   └── src/app/
+│       ├── globals.css
+│       ├── layout.tsx
+│       └── page.tsx               # Chat: input, response, trích dẫn nguồn
 │
-├── frontend-admin/                # Admin document management (Next.js)
+├── frontend-admin/                # Quản lý tài liệu (Next.js)
 │   ├── Dockerfile
-│   ├── .dockerignore
 │   ├── package.json
 │   ├── next.config.js
 │   ├── tsconfig.json
 │   ├── tailwind.config.js
-│   ├── postcss.config.js
-│   ├── node_modules/              # (generated on build)
-│   ├── .next/                     # (generated on build)
-│   └── src/
-│       └── app/
-│           ├── globals.css        # Tailwind + global styles
-│           ├── layout.tsx         # Root layout
-│           └── page.tsx           # Admin UI (upload, document table, ingest status)
+│   └── src/app/
+│       ├── globals.css
+│       ├── layout.tsx
+│       └── page.tsx               # Upload, bảng tài liệu, polling trạng thái
 │
-└── nginx/                         # Reverse proxy / load balancer
+└── nginx/                         # Reverse proxy
     ├── Dockerfile
-    ├── nginx.conf                 # Main Nginx config
+    ├── nginx.conf
     └── conf.d/
-        └── default.conf           # Routing rules (/ → user, /admin → admin, /api → backend)
+        └── default.conf           # /api → backend, /admin → admin, / → user
 ```
 
-### Key files explained
+### Các file quan trọng
 
-| File | Purpose |
-|------|---------|
-| `docker-compose.yml` | Defines all 8 services (containers), volumes, networks, health checks |
-| `requirements.txt` | Python packages (FastAPI, SQLAlchemy, Qdrant, MinIO, Celery, etc.) |
-| `backend/main.py` | REST API endpoints (`/api/ask`, `/api/search`, `/api/documents/*`, etc.) |
-| `backend/hybrid_search.py` | RAG pipeline: dense + sparse + RRF + rerank |
-| `worker/tasks/ingest.py` | Background task: extract PDF → chunk → embed → Qdrant |
-| `frontend-user/src/app/page.tsx` | Chat UI for end users |
-| `frontend-admin/src/app/page.tsx` | Admin panel for document management |
-| `nginx/conf.d/default.conf` | Routes requests: `/` → port 3000, `/admin` → 3001, `/api/*` → 8000 |
-
-### Data flow through the repo
-
-```
-Admin uploads file
-    ↓
-frontend-admin/src/app/page.tsx (UI)
-    ↓
-backend/main.py (/api/documents/upload)
-    ↓
-backend/storage/minio_client.py (save file)
-backend/models/__init__.py (save metadata)
-    ↓
-worker/tasks/ingest.py (Celery task)
-    ├─ backend/rag_extraction.py (extract text)
-    ├─ backend/rag_chunking.py (split into chunks)
-    ├─ backend/rag_embedding.py (embed chunks)
-    └─ backend/storage/qdrant_client.py (store vectors)
-    ↓
-User visits frontend-user
-    ↓
-User asks question in frontend-user/src/app/page.tsx
-    ↓
-backend/main.py (/api/ask)
-    ↓
-backend/hybrid_search.py
-    ├─ backend/rag_embedding.py (embed question)
-    ├─ backend/storage/qdrant_client.py (dense search)
-    ├─ backend/bm25_search.py (sparse search)
-    ├─ hybrid_search.py (RRF + rerank)
-    └─ LLM call (Claude via TrollLLM)
-    ↓
-Answer + sources → frontend-user
-```
+| File | Mục đích |
+|------|----------|
+| `docker-compose.yml` | Định nghĩa 8 dịch vụ, volumes, networks, health checks |
+| `backend/main.py` | REST endpoints: `/api/ask`, `/api/search`, `/api/documents/*` |
+| `backend/hybrid_search.py` | Bộ não truy xuất: dense + sparse + RRF + rerank + xử lý câu hỏi tổng hợp |
+| `backend/bm25_search.py` | Keyword search với cache invalidation theo signature |
+| `backend/rag_chunking.py` | Chunking theo câu với map khoảng trang PDF |
+| `worker/tasks/ingest.py` | Pipeline ingest nền (idempotent khi re-upload) |
+| `backend/storage/qdrant_client.py` | Wrapper Qdrant có payload index trên `source` |
+| `frontend-user/src/app/page.tsx` | UI chat sinh viên với trích dẫn `[file, pp. 5–6]` |
+| `frontend-admin/src/app/page.tsx` | Admin: upload, list, delete, trạng thái |
+| `nginx/conf.d/default.conf` | `/` → 3000, `/admin` → 3001, `/api/*` → 8000 |
 
 ---
 
-## Services & Ports
+## Dịch Vụ & Cổng
 
-| Service | Port | Purpose |
-|---------|------|---------|
-| **Nginx** | 80 | Reverse proxy (main entry point) |
-| **Frontend User** | 3000 | Chat UI (Q&A) |
-| **Frontend Admin** | 3001 | Admin panel (upload, manage docs) |
-| **Backend API** | 8000 | FastAPI + RAG logic |
-| **PostgreSQL** | 5432 | Document metadata, Q&A history |
-| **Qdrant** | 6333 | Vector database (embeddings) |
-| **MinIO** | 9000 | Object storage (uploaded files) |
-| **Redis** | 6379 | Message queue + cache |
+| Dịch vụ | Cổng | Mục đích |
+|---------|------|----------|
+| **Nginx** | 80 | Reverse proxy (entry point chính) |
+| **Frontend User** | 3000 | UI chat |
+| **Frontend Admin** | 3001 | Trang admin (upload, quản lý tài liệu) |
+| **Backend API** | 8000 | FastAPI + logic RAG |
+| **PostgreSQL** | 5432 | Metadata tài liệu, lịch sử Q&A |
+| **Qdrant** | 6333 / 6334 | Vector database (HTTP / gRPC) |
+| **MinIO** | 9000 / 9001 | Object storage / web console |
+| **Redis** | 6379 | Hàng đợi Celery + cache |
 
-All services are defined in `docker-compose.yml` and managed as Docker containers with persistent volumes.
+Tất cả dịch vụ được định nghĩa trong `docker-compose.yml` với named volume persistent.
 
 ---
 
-## Usage
+## Sử Dụng
 
-### Admin: Upload Documents
+### Admin: Upload Tài Liệu
 
-1. Open http://localhost/admin
-2. Drag or click to upload a PDF/TXT/DOCX/MD file (max 100 MB)
-3. Watch status change: **pending** → **processing** → **completed**
-4. Once completed, chunks appear in Qdrant and BM25 index
-5. View file details: size, chunk count, upload time
+1. Mở http://localhost/admin
+2. Kéo thả hoặc click để upload file PDF / TXT / DOCX / MD (tối đa 100 MB)
+3. Theo dõi trạng thái: **pending** → **processing** → **completed**
+4. Khi xong, các chunks có thể tìm kiếm được trong Qdrant và BM25
+5. Xem chi tiết file: size, số chunks, thời gian upload
 
-To delete a document:
-- Click the **Delete** button
-- This removes it from MinIO (storage), PostgreSQL (metadata), and Qdrant (vectors)
+**Xóa** sẽ remove tài liệu khỏi MinIO, Postgres, Qdrant, VÀ invalidate cache BM25 — cascade đầy đủ để tài liệu đã xóa không bao giờ bị trích dẫn lại.
 
-### User: Ask Questions
+### Người dùng: Đặt Câu Hỏi
 
-1. Open http://localhost (main UI)
-2. Type a question, e.g., "What is the main topic of these documents?"
+1. Mở http://localhost
+2. Gõ câu hỏi (tiếng Anh hoặc tiếng Việt)
 3. Click **Ask**
-4. Claude responds with:
-   - **Answer** — grounded in your uploaded documents
-   - **Sources** — file name, page number, relevance score, text preview
-5. View **Q&A history** via `/api/conversations` endpoint
+4. Claude trả lời với:
+   - **Câu trả lời** — dựa trên tài liệu đã upload
+   - **Nguồn** — tên file, khoảng trang (vd `pp. 5–6`), điểm liên quan, đoạn text mẫu
+5. Lịch sử Q&A truy cập qua `GET /api/conversations`
 
-### API: Programmatic Access
+### API: Truy Cập Lập Trình
 
-**List documents:**
+**Liệt kê tài liệu**
 ```bash
 curl http://localhost:8000/api/documents
 ```
 
-**Upload file:**
+**Upload file**
 ```bash
-curl -X POST http://localhost:8000/api/documents/upload \
-  -F "file=@myfile.pdf"
+curl -X POST http://localhost:8000/api/documents/upload -F "file=@myfile.pdf"
 ```
 
-**Ask a question:**
+**Hỏi một câu**
 ```bash
 curl -X POST http://localhost:8000/api/ask \
   -H "Content-Type: application/json" \
-  -d '{"question": "What does the document say about X?", "top_k": 5}'
+  -d '{"question": "Tóm tắt các chủ đề chính của tài liệu này", "top_k": 8}'
 ```
 
-**Semantic search:**
+**Semantic search (không qua LLM)**
 ```bash
 curl -X POST http://localhost:8000/api/search \
   -H "Content-Type: application/json" \
-  -d '{"query": "machine learning applications", "top_k": 10}'
+  -d '{"query": "ứng dụng machine learning", "top_k": 10}'
 ```
 
-Full API docs: http://localhost/docs
+API docs đầy đủ: http://localhost/docs
+
+---
+
+## Tính Năng Chính
+
+### Truy xuất lai (dense + sparse + rerank)
+- **Dense:** Qdrant vector similarity với multilingual MiniLM embeddings
+- **Sparse:** BM25 keyword search cho match từ chính xác (mã môn, tên riêng, v.v.)
+- **Fusion:** Reciprocal Rank Fusion (RRF) gộp hai bảng xếp hạng
+- **Rerank:** Cross-encoder đa ngôn ngữ (`mmarco-mMiniLMv2-L12-H384-v1`) đọc query + chunk cùng lúc để chấm điểm chính xác hơn
+
+### Xử lý câu hỏi tổng hợp / khái quát
+Tầng truy xuất tự phát hiện câu hỏi tổng hợp (`tóm tắt`, `chủ đề chính`, `so sánh`, `khái quát`, và các từ tiếng Anh tương đương) rồi điều chỉnh:
+- Tăng `top_k` từ 8 → 12
+- Lấy từ candidate pool lớn hơn (60 thay vì ~30)
+- Đa dạng hóa theo tài liệu nguồn để một file không chiếm hết context
+- Đổi sang system prompt định hướng tổng hợp khi gọi Claude
+
+### Chunking theo câu với map trang PDF
+- Chunk được cắt ở ranh giới câu (nhận biết dấu câu EN/VN/CJK) thay vì cắt giữa câu
+- Với PDF, các trang được nối lại trước, rồi chia chunk, rồi map ngược về khoảng trang để trích dẫn hiện `pp. 5–6` chính xác
+- Trang trống bị bỏ qua để nội dung không bị gán sai trang
+
+### Hỗ trợ đa ngôn ngữ
+- Embedding model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+- Reranker: bản đa ngôn ngữ khi embedding model đa ngôn ngữ
+- Chunker nhận biết ranh giới câu tiếng Anh, tiếng Việt và CJK
+
+### Xóa cascade đầy đủ
+Xóa một tài liệu sẽ remove khỏi cả 4 store theo đúng thứ tự:
+1. Qdrant (vectors) — đầu tiên, để khi retry không để lại embedding cũ
+2. MinIO (file)
+3. PostgreSQL (hàng metadata)
+4. Cache BM25 in-memory — invalidate qua signature hash, query sau sẽ rebuild lại không còn nguồn đã xóa
+
+### Re-ingest idempotent
+Upload lại cùng tên file sẽ gọi `delete_by_source` trên Qdrant trước khi upsert, nên file rút gọn không để lại chunks mồ côi từ phiên bản cũ.
+
+### Cache BM25 theo signature
+BM25 index cache một MD5 signature của tất cả các cặp `(source, chunk_index)`. Nếu Qdrant thay đổi (upload, delete), signature đổi và cache tự rebuild — không cần invalidate thủ công.
+
+### Ingest bất đồng bộ qua Celery
+Upload trả về ngay (~100 ms). Worker xử lý extraction, chunking, embedding ở nền, nên PDF 50 trang không làm treo UI.
 
 ---
 
@@ -362,68 +342,75 @@ Full API docs: http://localhost/docs
 ### Frontend
 - **Framework:** Next.js 14 (React 18, TypeScript)
 - **Styling:** Tailwind CSS
-- **User Chat:** Real-time question input, streaming response display, source citations
-- **Admin:** File upload, document table, ingest status polling (every 3s)
+- **UI người dùng:** Input câu hỏi, hiển thị response, trích dẫn nguồn với khoảng trang
+- **UI admin:** Upload file, bảng tài liệu, polling trạng thái
 
 ### Backend
 - **Framework:** FastAPI (Python 3.11)
-- **LLM:** Claude via TrollLLM proxy
-- **RAG Pipeline:**
-  - Embeddings: sentence-transformers (local, no API calls)
-  - Dense search: Qdrant vector database
-  - Sparse search: BM25 (rank-bm25 library)
-  - Reranking: cross-encoder (sentence-transformers)
-  - Fusion: reciprocal rank fusion (RRF)
-- **Text Processing:**
+- **LLM:** Claude (`claude-sonnet-4-6` mặc định) qua proxy TrollLLM
+- **RAG pipeline:**
+  - Embeddings: `sentence-transformers` (local, không gọi API)
+  - Dense search: Qdrant
+  - Sparse search: BM25 (`rank-bm25`)
+  - Rerank: cross-encoder (`sentence-transformers`)
+  - Fusion: Reciprocal Rank Fusion (RRF)
+- **Xử lý văn bản:**
   - PDF: pdfplumber
   - DOCX: python-docx
-  - TXT/MD: standard file I/O
-  - Chunking: sliding window with overlap
+  - TXT/MD: file I/O chuẩn
+  - Chunking: theo câu, có overlap
 
-### Infrastructure
-- **Databases:**
-  - PostgreSQL 15 — document metadata, conversation history
-  - Qdrant — vector storage (embeddings)
-  - Redis 7 — message queue (Celery), caching
-- **Storage:** MinIO — S3-compatible object storage (uploaded files)
-- **Task Queue:** Celery + Redis — background document processing
-- **Reverse Proxy:** Nginx 1.27 — routing and compression
-- **Orchestration:** Docker Compose
+### Hạ tầng
+- **PostgreSQL 15** — metadata tài liệu, lịch sử hội thoại
+- **Qdrant** — lưu trữ vector (có payload index trên `source`)
+- **MinIO** — object storage tương thích S3
+- **Redis 7** — message queue cho Celery + cache
+- **Celery** — xử lý tài liệu nền
+- **Nginx** — reverse proxy và routing
+- **Docker Compose** — điều phối 8 dịch vụ
 
 ---
 
-## Environment Variables
+## Biến Môi Trường
 
-Copy `.env.example` to `.env` and fill in:
+Copy `.env.example` sang `.env` rồi điền:
 
 ```bash
-# Claude API (TrollLLM proxy)
+# Claude API (proxy TrollLLM)
 ANTHROPIC_API_KEY=sk-trollllm-your-key-here
 ANTHROPIC_BASE_URL=https://chat.trollllm.xyz
 CLAUDE_MODEL=claude-sonnet-4-6
+CLAUDE_MAX_TOKENS=4000          # Ngân sách lớn hơn để câu trả lời tổng hợp không bị cắt
 
-# Database credentials
+# Database
 POSTGRES_USER=raguser
 POSTGRES_PASSWORD=ragpass
 POSTGRES_DB=rag_db
 
-# MinIO credentials (default, safe for local dev)
+# MinIO (mặc định, an toàn cho local dev)
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 
-# Docker Hub (for pushing images, optional)
-DOCKER_USER=yourusername
+# Tuning RAG
+CHUNK_SIZE=500
+CHUNK_OVERLAP=100
+RETRIEVAL_TOP_K=8               # Tự động mở rộng lên 12 cho câu hỏi tổng hợp
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+
+# Upload
+MAX_UPLOAD_SIZE_MB=100
+
+# Docker Hub (tùy chọn, dùng khi push image)
+# DOCKER_USER=your-dockerhub-username
 ```
 
-**Never commit `.env` to Git** — it's in `.gitignore`. Only `.env.example` is tracked.
+**Không bao giờ commit `.env`** — đã có trong `.gitignore`. Chỉ `.env.example` được track.
 
 ---
 
-## Development
+## Phát Triển
 
-### Local testing (without Docker)
-
-To run the backend + worker locally for faster iteration:
+### Test local (không qua Docker)
 
 ```bash
 # Terminal 1: Backend API
@@ -432,74 +419,77 @@ uvicorn backend.main:app --reload --port 8000
 # Terminal 2: Worker
 celery -A worker.tasks.celery_app worker --loglevel=info --pool=solo
 
-# Terminal 3: MinIO, Qdrant, PostgreSQL (still in Docker)
+# Terminal 3: Các dịch vụ storage (vẫn chạy trong Docker)
 docker compose up postgres qdrant minio redis
 ```
 
-### Logs
+### Xem logs
 
 ```bash
-# All services
+# Tất cả dịch vụ
 docker compose logs -f
 
-# Specific service
+# Một dịch vụ cụ thể
 docker compose logs -f backend
 docker compose logs -f worker
 docker compose logs -f frontend-user
 ```
 
-### Rebuilding after code changes
+### Rebuild sau khi sửa code
 
-Backend/worker code changes:
 ```bash
+# Backend / worker
 docker compose build backend worker
 docker compose up -d
-```
 
-Frontend code changes:
-```bash
+# Frontends
 docker compose build frontend-user frontend-admin
 docker compose up -d
-```
 
-All at once:
-```bash
+# Toàn bộ
 docker compose build
 docker compose up -d
 ```
 
-### Performance tuning
+### Tinh chỉnh hiệu năng
 
-- **BM25 slow on first query?** It rebuilds the index from Qdrant. After the first search, it's fast. Or set `use_rerank=False` in `hybrid_search()` to skip the cross-encoder.
-- **Out of memory?** Increase Docker Desktop memory to 4+ GB in Settings → Resources. The cross-encoder + embedding model together use ~2-3 GB.
-- **Worker stuck?** Make sure it's running: `docker compose logs -f worker`. Celery needs Redis healthy.
+- **Query đầu chậm?** BM25 build index lần đầu. Các query sau nhanh (cache theo signature).
+- **Hết RAM khi ingest?** Tăng Docker memory lên 8 GB (Settings → Resources). Cross-encoder + embedder dùng ~2–3 GB. Tránh upload nhiều PDF lớn cùng lúc.
+- **Worker bị kẹt?** `docker compose logs -f worker`. Đảm bảo Redis healthy.
+- **Reranker chậm?** Set `use_rerank=False` trong `hybrid_search()` khi dev.
+
+### Shutdown an toàn
+
+```bash
+docker compose down              # Dừng + xóa container (volume vẫn giữ)
+```
+
+Để xóa sạch toàn bộ dữ liệu (cả file đã upload và vector):
+```bash
+docker compose down -v           # Xóa cả named volume — phá hủy dữ liệu
+```
 
 ---
 
-## Deployment
+## Triển Khai
 
-### Push images to Docker Hub
+### Push image lên Docker Hub
 
 ```bash
-# 1. Log in
 docker login
-
-# 2. Update .env with your username
-DOCKER_USER=your_dockerhub_username
-
-# 3. Build and push
+# Set DOCKER_USER trong .env
 docker compose build
 docker compose push
 ```
 
-Images on Docker Hub:
-- `your_username/rag-backend:latest`
-- `your_username/rag-worker:latest`
-- `your_username/rag-frontend-user:latest`
-- `your_username/rag-frontend-admin:latest`
-- `your_username/rag-nginx:latest`
+Các image:
+- `<user>/rag-backend:latest`
+- `<user>/rag-worker:latest`
+- `<user>/rag-frontend-user:latest`
+- `<user>/rag-frontend-admin:latest`
+- `<user>/rag-nginx:latest`
 
-### On a fresh machine
+### Trên máy mới
 
 ```bash
 docker compose pull
@@ -508,62 +498,67 @@ docker compose up -d
 
 ---
 
-## Team
+## Khắc Phục Sự Cố
 
-| Name | Role |
-|------|------|
-| [Your Name] | Backend + RAG Pipeline |
-| [Team Member 2] | Frontend User |
-| [Team Member 3] | Frontend Admin |
-| [Team Member 4] | DevOps + Deployment |
+**`docker compose up -d` treo ở bước build Next.js**
+Build lần đầu tải ~500 MB npm packages và model sentence-transformer. Chờ 10 phút ở lần đầu.
 
-**Advisor:** [Professor Name]
+**Backend không kết nối được PostgreSQL**
+- `docker compose logs postgres` — kiểm tra healthy chưa
+- `DATABASE_URL` trong compose phải dùng `postgres:5432` (không phải `localhost`)
+
+**Worker không xử lý tài liệu**
+- `docker compose logs worker` — xem lỗi
+- `docker compose logs redis` — Celery cần Redis healthy
+
+**Upload lỗi "MinIO error"**
+- `docker compose restart minio`
+- Check console MinIO: http://localhost:9001
+
+**Hết RAM / container exit (255)**
+- Tăng Docker memory lên 8 GB
+- Upload từng file lớn một
+- Set worker `--concurrency=1` nếu muốn giữ RAM thấp
+
+**Tài liệu ma (đã xóa nhưng vẫn bị trích dẫn)**
+- Cascade xóa sẽ clear Qdrant, MinIO, SQL, và cache BM25. Nếu bị kẹt, restart backend để BM25 rebuild: `docker compose restart backend`
+- Trường hợp xấu nhất, wipe volume Qdrant: `docker compose down && docker volume rm rag-system_qdrant_data && docker compose up -d`
+
+**API trả về 502**
+- Kiểm tra log backend: `docker compose logs backend`
+- Verify tất cả storage healthy: `docker compose ps`
+- Nếu dùng proxy TrollLLM, 502 thỉnh thoảng là lỗi upstream — thử lại query.
 
 ---
 
-## Assignment Completion Checklist
+## Đội Ngũ
 
-- [x] GitHub private repo (professors invited)
-- [x] `docker compose up -d` works on fresh system
-- [x] `.env.example` present (no real secrets committed)
-- [x] All 5 Docker images on Docker Hub
-- [x] README with architecture diagram
-- [x] All 8 services running (nginx, 2 frontends, backend, worker, postgres, qdrant, minio, redis)
-- [x] RAG pipeline complete:
-  - [x] Document upload & ingest (extract → chunk → embed)
+| Thành viên | Vai trò | Phụ trách |
+|------------|---------|-----------|
+| Lead | Kiến trúc + bộ não truy xuất RAG | `hybrid_search.py`, `bm25_search.py`, chat endpoint, prompt design |
+| Ingestion | Pipeline xử lý dữ liệu | `worker/tasks/ingest.py`, `rag_chunking.py`, luồng upload |
+| Backend Infra | Storage + điều phối | `docker-compose.yml`, storage clients, models, config |
+| Frontend / UX | Ứng dụng giao diện | `frontend-user/`, `frontend-admin/`, `nginx/` |
+
+---
+
+## Checklist
+
+- [x] Repo GitHub private (đã mời giáo viên)
+- [x] `docker compose up -d` chạy được trên máy mới
+- [x] `.env.example` có sẵn (không commit secret thật)
+- [x] Tất cả 5 Docker image trên Docker Hub
+- [x] README có sơ đồ kiến trúc
+- [x] Đủ 8 dịch vụ chạy (nginx, 2 frontends, backend, worker, postgres, qdrant, minio, redis)
+- [x] Pipeline RAG hoàn chỉnh:
+  - [x] Upload & ingest tài liệu (extract → chunk → embed)
   - [x] Dense semantic search (Qdrant)
   - [x] Sparse keyword search (BM25)
   - [x] RRF fusion
   - [x] Cross-encoder reranking
-  - [x] Grounded Q&A with source citations
-- [x] User-facing chat UI
-- [x] Admin document management UI
-- [x] Reverse proxy load balancer (Nginx)
-
----
-
-## Troubleshooting
-
-**"docker compose up -d" hangs on Next.js build**
-- First build downloads ~500 MB of npm packages. Wait 10 minutes.
-
-**Backend can't connect to PostgreSQL**
-- Make sure `postgres` container is healthy: `docker compose logs postgres`
-- Check that `DATABASE_URL` in docker-compose uses `postgres:5432` (not `localhost`)
-
-**Worker not processing documents**
-- Check Redis: `docker compose logs redis`
-- Check worker: `docker compose logs worker`
-- Make sure Celery config matches in both backend and worker
-
-**Uploads fail with "MinIO error"**
-- Restart MinIO: `docker compose restart minio`
-- Check MinIO console: http://localhost:9001
-
-**Out of memory during first query**
-- Increase Docker memory: Settings → Resources → 4+ GB
-- Or disable reranking in `hybrid_search()` for now
-
-**API returning 502 errors**
-- Check backend logs: `docker compose logs backend`
-- Verify all storage services are healthy: `docker compose ps`
+  - [x] Q&A có trích dẫn nguồn
+  - [x] Xử lý câu hỏi tổng hợp / khái quát
+  - [x] Xóa cascade đầy đủ
+- [x] UI chat người dùng
+- [x] UI admin quản lý tài liệu
+- [x] Reverse proxy (Nginx)
