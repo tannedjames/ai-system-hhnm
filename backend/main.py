@@ -311,6 +311,43 @@ def delete_document(filename: str, db: Session = Depends(get_db)):
     return {"success": True, "deleted": filename}
 
 
+@app.post("/api/documents/{filename}/reindex")
+def reindex_document(filename: str, db: Session = Depends(get_db)):
+    """Re-ingest a document: delete old vectors and queue a new ingest task."""
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+    try:
+        qdrant.delete_by_source(filename)
+    except Exception as e:
+        logger.warning(f"Qdrant cleanup before re-index failed: {e}")
+
+    try:
+        from backend.bm25_search import invalidate_cache
+        invalidate_cache()
+    except Exception as e:
+        logger.warning(f"BM25 cache invalidation failed: {e}")
+
+    doc.status = "pending"
+    doc.chunks_count = 0
+    doc.error_message = None
+    db.commit()
+    db.refresh(doc)
+
+    try:
+        from worker.tasks.ingest import ingest_document
+        ingest_document.delay(filename, doc.id)
+        logger.info(f"Queued re-index task for: {filename}")
+    except Exception as e:
+        logger.warning(f"Could not queue Celery task: {e}")
+
+    return {"success": True, "message": f"Re-indexing {filename}"}
+
+
 # ---------- RAG: Search ----------
 @app.post("/api/search")
 def search(req: SearchRequest):
