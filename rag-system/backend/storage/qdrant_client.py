@@ -106,6 +106,65 @@ def search_chunks(query_vector: List[float], top_k: int = 5) -> List[Dict[str, A
     ]
 
 
+def search_by_source(
+    query_vector: List[float],
+    source: str,
+    top_k: int = 3,
+) -> List[Dict[str, Any]]:
+    """Dense search constrained to a single source document.
+
+    Used by broad-question retrieval to guarantee every document contributes
+    chunks to the rerank pool, even when statistically dominated by larger docs.
+    Cheap because the `source` payload field is indexed.
+    """
+    results = client.query_points(
+        collection_name=settings.QDRANT_COLLECTION,
+        query=query_vector,
+        limit=top_k,
+        query_filter=Filter(
+            must=[FieldCondition(key="source", match=MatchValue(value=source))]
+        ),
+    ).points
+
+    return [
+        {
+            "text": r.payload.get("text", ""),
+            "source": r.payload.get("source", "unknown"),
+            "page": r.payload.get("page", 0),
+            "page_end": r.payload.get("page_end", r.payload.get("page", 0)),
+            "chunk_index": r.payload.get("chunk_index", 0),
+            "score": float(r.score),
+        }
+        for r in results
+    ]
+
+
+def list_unique_sources() -> List[str]:
+    """Return every distinct `source` value currently in the collection.
+
+    Used to know which documents exist in the corpus so broad queries can
+    guarantee at least one chunk per document. Scrolls the payload-only view,
+    so it's cheap even on larger collections.
+    """
+    seen = set()
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=settings.QDRANT_COLLECTION,
+            limit=512,
+            offset=offset,
+            with_payload=["source"],
+            with_vectors=False,
+        )
+        for p in points:
+            src = (p.payload or {}).get("source")
+            if src:
+                seen.add(src)
+        if offset is None:
+            break
+    return sorted(seen)
+
+
 def delete_by_source(source: str):
     """Delete all chunks for a specific source file."""
     client.delete(

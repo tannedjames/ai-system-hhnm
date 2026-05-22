@@ -62,9 +62,9 @@ Tất cả 8 container phải hiện `running` hoặc `healthy`.
 
 ### 5. Mở giao diện
 
-- **Chat người dùng:** http://localhost (hoặc http://localhost:3000)
-- **Trang admin:** http://localhost/admin (hoặc http://localhost:3001)
-- **API docs:** http://localhost/docs (hoặc http://localhost:8000/docs)
+- **Chat người dùng:** http://localhost:3000 
+- **Trang admin:** http://localhost:3001
+- **API docs:** http://localhost:8000/docs
 - **MinIO console:** http://localhost:9001 (đăng nhập: `minioadmin` / `minioadmin`)
 - **Qdrant dashboard:** http://localhost:6333/dashboard
 
@@ -84,7 +84,7 @@ Tất cả 8 container phải hiện `running` hoặc `healthy`.
   │  Frontend User   │   │   Frontend    │  │   Backend    │
   │  (cổng 3000)     │   │    Admin      │  │  (cổng 8000) │
   │  Next.js         │   │  (cổng 3001)  │  │   FastAPI    │
-  │  Giao diện chat  │   │  Next.js      │  │   Logic RAG  │
+  │  Chat + Upload   │   │  Next.js      │  │   Logic RAG  │
   │  + trích dẫn     │   │  Upload & QL  │  │              │
   └──────────────────┘   └───────────────┘  └────┬─────────┘
                                                   │
@@ -104,7 +104,7 @@ Tất cả 8 container phải hiện `running` hoặc `healthy`.
 
 **Ingest (chạy nền, qua Celery worker)**
 ```
-Admin upload file
+Admin hoặc người dùng upload file
     ↓
 Backend lưu vào MinIO + tạo hàng PostgreSQL
     ↓
@@ -188,7 +188,7 @@ rag-system/
 │   └── src/app/
 │       ├── globals.css
 │       ├── layout.tsx
-│       └── page.tsx               # Chat: input, response, trích dẫn nguồn
+│       └── page.tsx               # Chat + upload panel + trích dẫn nguồn
 │
 ├── frontend-admin/                # Quản lý tài liệu (Next.js)
 │   ├── Dockerfile
@@ -246,7 +246,7 @@ Tất cả dịch vụ được định nghĩa trong `docker-compose.yml` với 
 
 ### Admin: Upload Tài Liệu
 
-1. Mở http://localhost/admin
+1. Mở http://localhost:3001
 2. Kéo thả hoặc click để upload file PDF / TXT / DOCX / MD (tối đa 100 MB)
 3. Theo dõi trạng thái: **pending** → **processing** → **completed**
 4. Khi xong, các chunks có thể tìm kiếm được trong Qdrant và BM25
@@ -254,15 +254,24 @@ Tất cả dịch vụ được định nghĩa trong `docker-compose.yml` với 
 
 **Xóa** sẽ remove tài liệu khỏi MinIO, Postgres, Qdrant, VÀ invalidate cache BM25 — cascade đầy đủ để tài liệu đã xóa không bao giờ bị trích dẫn lại.
 
-### Người dùng: Đặt Câu Hỏi
+### Người dùng: Đặt Câu Hỏi & Upload Tài Liệu
 
-1. Mở http://localhost
+1. Mở http://localhost:3000 
 2. Gõ câu hỏi (tiếng Anh hoặc tiếng Việt)
 3. Click **Ask**
 4. Claude trả lời với:
    - **Câu trả lời** — dựa trên tài liệu đã upload
    - **Nguồn** — tên file, khoảng trang (vd `pp. 5–6`), điểm liên quan, đoạn text mẫu
 5. Lịch sử Q&A truy cập qua `GET /api/conversations`
+
+**Upload trực tiếp từ trang user:**
+1. Click nút **Upload** ở góc phải header
+2. Kéo thả hoặc click vùng dashed để chọn file PDF / TXT / DOCX / MD (tối đa 100 MB)
+3. Mỗi file hiển thị trạng thái real-time: `Uploading…` → `Indexing…` → `Ready`
+4. Khi trạng thái là **Ready**, file đã được indexed và có thể hỏi ngay
+5. Nếu lỗi (file quá lớn, MinIO down, v.v.), trạng thái chuyển sang **Failed** kèm thông báo
+
+Lưu ý: Trang user dùng cùng endpoint `/api/documents/upload` với admin — tài liệu user upload chung không gian với admin (không có per-user scoping).
 
 ### API: Truy Cập Lập Trình
 
@@ -342,8 +351,8 @@ Upload trả về ngay (~100 ms). Worker xử lý extraction, chunking, embeddin
 ### Frontend
 - **Framework:** Next.js 14 (React 18, TypeScript)
 - **Styling:** Tailwind CSS
-- **UI người dùng:** Input câu hỏi, hiển thị response, trích dẫn nguồn với khoảng trang
-- **UI admin:** Upload file, bảng tài liệu, polling trạng thái
+- **UI người dùng:** Input câu hỏi, hiển thị response, trích dẫn nguồn với khoảng trang, **upload panel có thể mở/đóng với drag-and-drop**, polling trạng thái indexing
+- **UI admin:** Upload file, bảng tài liệu, polling trạng thái, delete với cascade đầy đủ
 
 ### Backend
 - **Framework:** FastAPI (Python 3.11)
@@ -551,7 +560,7 @@ Build lần đầu tải ~500 MB npm packages và model sentence-transformer. Ch
 - [x] README có sơ đồ kiến trúc
 - [x] Đủ 8 dịch vụ chạy (nginx, 2 frontends, backend, worker, postgres, qdrant, minio, redis)
 - [x] Pipeline RAG hoàn chỉnh:
-  - [x] Upload & ingest tài liệu (extract → chunk → embed)
+  - [x] Upload & ingest tài liệu (extract → chunk → embed) — từ cả admin và trang user
   - [x] Dense semantic search (Qdrant)
   - [x] Sparse keyword search (BM25)
   - [x] RRF fusion

@@ -38,17 +38,31 @@ _reranker = None
 _reranker_failed = False
 
 # Recognising broad/synthesis-style questions in English and Vietnamese.
+# Includes plural forms ("what are these files about", "what are the documents
+# about") because asking about multiple sources is *the* canonical broad query
+# and must trigger broad-mode retrieval to avoid small-doc starvation.
 _BROAD_QUERY_PATTERNS = re.compile(
     r"\b("
     r"summari[sz]e|summary|overview|outline|main\s+(topic|idea|theme|point)s?|"
     r"key\s+(point|takeaway|idea|theme)s?|overall|in\s+general|"
-    r"what\s+is\s+(this|the\s+document|the\s+paper|the\s+book)\s+about|"
+    # Permissive "what is/are/do/does ... about" — catches any noun the user picks:
+    # "files", "stuff", "uploaded stuff", "the materials", "these things", etc.
+    # Matches up to ~60 chars between "is/are" and "about". No end-anchor so
+    # trailing punctuation (?, .) doesn't break the outer \b word-boundary.
+    r"what\s+(is|are|do|does)\s+[\w\s'\-]{1,60}\s+about|"
+    r"what\s+(is|are)\s+(this|these|it|they)\s+about|"
+    r"what(\s+are)?\s+(these|the|all\s+the)\s+(document|paper|book|file)s?(\s+about)?|"
+    # Informal "tell me about" and "explain/describe these/all/everything" forms
+    r"tell\s+me\s+about\s+(this|these|them|all|everything|the\s+\w+)|"
+    r"(explain|describe)\s+(this|these|them|all|everything|the\s+\w+)|"
     r"compare|contrast|differences?|similarities|across|throughout|"
     r"list\s+(all|the)|all\s+the|every|each\s+chapter|"
     r"tom\s*tat|tong\s*quan|chu\s*de\s*chinh|y\s*chinh|"
     r"noi\s*dung\s*chinh|liet\s*ke|so\s*sanh|tong\s*hop|"
+    r"(cac|nhung|nhg)\s*(tai\s*lieu|file|van\s*ban)|"
     r"tóm\s*tắt|tổng\s*quan|chủ\s*đề\s*chính|ý\s*chính|"
-    r"nội\s*dung\s*chính|liệt\s*kê|so\s*sánh|tổng\s*hợp"
+    r"nội\s*dung\s*chính|liệt\s*kê|so\s*sánh|tổng\s*hợp|"
+    r"(các|những)\s*(tài\s*liệu|file|văn\s*bản)"
     r")\b",
     re.IGNORECASE,
 )
@@ -173,6 +187,67 @@ def rerank(
     return reranked[:top_k]
 
 
+def _ensure_per_source_coverage(
+    fused: List[Dict[str, Any]],
+    pool_size: int,
+    min_per_source: int,
+) -> List[Dict[str, Any]]:
+    """Take the top `pool_size` chunks from `fused`, but guarantee that every
+    source appearing anywhere in `fused` contributes at least `min_per_source`
+    chunks (if it has that many).
+
+    Why this exists
+    ---------------
+    Without this, a small document (say 3 chunks) competing against a large
+    document (100+ chunks) can be statistically squeezed out of the rerank
+    pool entirely — even when the user asks a broad question. The rerank
+    pool was a fixed top-N over the fused list, and that fixed N was almost
+    always dominated by the bigger document.
+
+    With this, under-represented sources are topped up from lower positions
+    in the fused list, so the reranker actually sees their chunks. Adds zero
+    new queries — only re-orders already-fetched data.
+    """
+    if not fused or pool_size <= 0:
+        return []
+
+    pool: List[Dict[str, Any]] = list(fused[:pool_size])
+    pool_keys = {_chunk_key(c) for c in pool}
+
+    # Tally current per-source representation
+    counts: Dict[str, int] = {}
+    for c in pool:
+        src = c.get("source", "unknown")
+        counts[src] = counts.get(src, 0) + 1
+
+    # Collect every source that appears in the full fused list, in fused order
+    seen_sources = set()
+    all_sources: List[str] = []
+    for c in fused:
+        src = c.get("source", "unknown")
+        if src not in seen_sources:
+            seen_sources.add(src)
+            all_sources.append(src)
+
+    # Top up under-represented sources from positions below pool_size
+    for src in all_sources:
+        if counts.get(src, 0) >= min_per_source:
+            continue
+        for c in fused[pool_size:]:
+            if counts.get(src, 0) >= min_per_source:
+                break
+            if c.get("source", "unknown") != src:
+                continue
+            key = _chunk_key(c)
+            if key in pool_keys:
+                continue
+            pool.append(c)
+            pool_keys.add(key)
+            counts[src] = counts.get(src, 0) + 1
+
+    return pool
+
+
 def _diversify_by_source(
     chunks: List[Dict[str, Any]],
     top_k: int,
@@ -218,7 +293,9 @@ def hybrid_search(
 
     if is_broad:
         effective_top_k = max(top_k, 12)
-        effective_candidate_k = candidate_k if candidate_k is not None else 60
+        # Wider net for broad queries — small docs that rank low globally must
+        # still appear in dense top-N so they can be reranked alongside the rest.
+        effective_candidate_k = candidate_k if candidate_k is not None else 200
     else:
         effective_top_k = top_k
         effective_candidate_k = candidate_k if candidate_k is not None else max(30, top_k * 5)
@@ -245,11 +322,60 @@ def hybrid_search(
 
     fused = reciprocal_rank_fusion(dense, sparse)
 
-    rerank_pool = min(len(fused), max(effective_top_k * 3, 30))
+    # Strong guarantee for broad queries: explicitly pull the top chunks from
+    # *every* document in the corpus, not just the top-N globally. This is the
+    # only way a small doc (3 chunks) competing against a big doc (200 chunks)
+    # can be sure to land in the rerank pool — global ranking will always favor
+    # the bigger doc on generic queries like "main topic".
+    if is_broad:
+        try:
+            all_sources = qdrant.list_unique_sources()
+            sources_in_fused = {c.get("source", "unknown") for c in fused}
+            missing_sources = [s for s in all_sources if s not in sources_in_fused]
+            if missing_sources:
+                logger.info(
+                    f"hybrid_search: forcing inclusion of {len(missing_sources)} "
+                    f"missing source(s) for broad query"
+                )
+            existing_keys = {_chunk_key(c) for c in fused}
+            for src in all_sources:
+                try:
+                    per_source_hits = qdrant.search_by_source(
+                        query_vector, src, top_k=3
+                    )
+                except Exception as e:
+                    logger.warning(f"Per-source query for '{src}' failed: {e}")
+                    continue
+                for c in per_source_hits:
+                    if _chunk_key(c) in existing_keys:
+                        continue
+                    # Append at the END — RRF order is preserved; supplemental
+                    # chunks are just guaranteed to be visible to the reranker.
+                    fused.append(c)
+                    existing_keys.add(_chunk_key(c))
+        except Exception as e:
+            logger.warning(f"Per-source augmentation failed (continuing): {e}")
+
+    rerank_pool_size = min(len(fused), max(effective_top_k * 3, 30))
+    # Guarantee small documents aren't squeezed out by larger ones: every source
+    # in `fused` contributes at least `min_per_source` chunks to the rerank pool.
+    # Broader queries widen the guarantee since synthesis answers need every doc.
+    min_per_source = 2 if is_broad else 1
+    rerank_input = _ensure_per_source_coverage(
+        fused,
+        pool_size=rerank_pool_size,
+        min_per_source=min_per_source,
+    )
+    logger.info(
+        f"hybrid_search: rerank_pool={len(rerank_input)} "
+        f"(natural={rerank_pool_size}, min_per_source={min_per_source}, "
+        f"sources={len({c.get('source','unknown') for c in rerank_input})})"
+    )
+
     if use_rerank:
-        reranked = rerank(query, fused[:rerank_pool], top_k=rerank_pool)
+        reranked = rerank(query, rerank_input, top_k=len(rerank_input))
     else:
-        reranked = fused[:rerank_pool]
+        reranked = rerank_input
 
     unique_sources = {c.get("source", "unknown") for c in reranked}
     if is_broad and len(unique_sources) > 1:
