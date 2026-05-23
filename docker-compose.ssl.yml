@@ -1,0 +1,32 @@
+services:
+  nginx:
+    volumes:
+      - ./ssl/nginx-ssl.conf:/etc/nginx/conf.d/default.conf:ro
+      - certbot_etc:/etc/letsencrypt
+      - certbot_var:/var/www/certbot
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: rag-certbot
+    profiles: ["ssl-init"]
+    volumes:
+      - certbot_etc:/etc/letsencrypt
+      - certbot_var:/var/www/certbot
+    entrypoint: /bin/sh
+    command: -c "echo 'Use this service with docker compose run --rm certbot ...' && sleep infinity"
+
+  certbot-renewer:
+    image: alpine:3.20
+    container_name: rag-certbot-renewer
+    profiles: ["ssl"]
+    volumes:
+      - certbot_etc:/etc/letsencrypt
+      - certbot_var:/var/www/certbot
+      - ./scripts/reload-nginx.sh:/hooks/reload-nginx.sh:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: /bin/sh
+    command: -c "apk add --no-cache certbot docker-cli && trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --deploy-hook /hooks/reload-nginx.sh --quiet || true; sleep 12h; done"
+
+volumes:
+  certbot_etc:
+  certbot_var:

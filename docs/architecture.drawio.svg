@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="560" viewBox="0 0 1100 560" role="img" aria-label="RAG system architecture">
+  <defs>
+    <style>
+      .box{fill:#ffffff;stroke:#334155;stroke-width:2;rx:14}
+      .svc{fill:#eef2ff;stroke:#4f46e5}
+      .data{fill:#ecfdf5;stroke:#059669}
+      .queue{fill:#fff7ed;stroke:#ea580c}
+      .text{font:600 18px Arial,sans-serif;fill:#0f172a}
+      .small{font:14px Arial,sans-serif;fill:#475569}
+      .arrow{stroke:#334155;stroke-width:2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect x="30" y="30" width="1040" height="500" fill="#f8fafc" stroke="#cbd5e1" rx="18"/>
+  <text x="550" y="66" text-anchor="middle" class="text">Academic Course Assistant — RAG Architecture</text>
+
+  <rect x="70" y="115" width="180" height="90" class="box svc"/>
+  <text x="160" y="150" text-anchor="middle" class="text">User UI</text>
+  <text x="160" y="176" text-anchor="middle" class="small">chat + citations</text>
+
+  <rect x="70" y="245" width="180" height="110" class="box svc"/>
+  <text x="160" y="282" text-anchor="middle" class="text">Admin UI</text>
+  <text x="160" y="308" text-anchor="middle" class="small">upload / users</text>
+  <text x="160" y="330" text-anchor="middle" class="small">RAG settings</text>
+
+  <rect x="320" y="160" width="170" height="120" class="box svc"/>
+  <text x="405" y="202" text-anchor="middle" class="text">Nginx</text>
+  <text x="405" y="228" text-anchor="middle" class="small">load balancer</text>
+  <text x="405" y="250" text-anchor="middle" class="small">reverse proxy</text>
+
+  <rect x="560" y="125" width="190" height="130" class="box svc"/>
+  <text x="655" y="166" text-anchor="middle" class="text">FastAPI Backend</text>
+  <text x="655" y="192" text-anchor="middle" class="small">ask/search/admin API</text>
+  <text x="655" y="214" text-anchor="middle" class="small">LLM answer + sources</text>
+
+  <rect x="560" y="315" width="190" height="130" class="box queue"/>
+  <text x="655" y="356" text-anchor="middle" class="text">Celery Worker</text>
+  <text x="655" y="382" text-anchor="middle" class="small">extract → chunk</text>
+  <text x="655" y="404" text-anchor="middle" class="small">embed → upsert</text>
+
+  <rect x="825" y="105" width="185" height="80" class="box data"/>
+  <text x="918" y="138" text-anchor="middle" class="text">PostgreSQL</text>
+  <text x="918" y="162" text-anchor="middle" class="small">metadata/history</text>
+
+  <rect x="825" y="220" width="185" height="80" class="box data"/>
+  <text x="918" y="253" text-anchor="middle" class="text">MinIO</text>
+  <text x="918" y="277" text-anchor="middle" class="small">original files</text>
+
+  <rect x="825" y="335" width="185" height="80" class="box data"/>
+  <text x="918" y="368" text-anchor="middle" class="text">Qdrant</text>
+  <text x="918" y="392" text-anchor="middle" class="small">semantic vectors</text>
+
+  <rect x="825" y="450" width="185" height="55" class="box queue"/>
+  <text x="918" y="484" text-anchor="middle" class="text">Redis Queue</text>
+
+  <path d="M250 160 H320" class="arrow"/>
+  <path d="M250 300 H320 V240" class="arrow"/>
+  <path d="M490 220 H560" class="arrow"/>
+  <path d="M655 255 V315" class="arrow"/>
+  <path d="M750 190 H825 V145" class="arrow"/>
+  <path d="M750 220 H825 V260" class="arrow"/>
+  <path d="M750 380 H825 V375" class="arrow"/>
+  <path d="M750 420 H825 V478" class="arrow"/>
+  <path d="M825 478 H780 V380 H750" class="arrow"/>
+</svg>

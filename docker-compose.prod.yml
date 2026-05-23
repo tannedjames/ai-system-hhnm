@@ -1,0 +1,30 @@
+services:
+  postgres:
+    ports: []
+  qdrant:
+    ports: []
+  minio:
+    ports: []
+  redis:
+    ports: []
+  backend:
+    ports: []
+    environment:
+      ENVIRONMENT: production
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://${DOMAIN}}
+  frontend-user:
+    ports: []
+    environment:
+      NEXT_PUBLIC_API_URL: ""
+  frontend-admin:
+    ports: []
+    environment:
+      NEXT_PUBLIC_API_URL: ""
+  nginx:
+    ports:
+      - "80:80"
+      - "443:443"
+  grafana:
+    ports: []
+  prometheus:
+    ports: []

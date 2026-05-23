@@ -1,5 +1,6 @@
 """Qdrant vector database client."""
 import logging
+from collections import Counter
 from typing import List, Dict, Any
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -19,7 +20,17 @@ logger = logging.getLogger(__name__)
 client = QdrantClient(url=settings.QDRANT_URL)
 
 
-def init_collection():
+def _vector_size() -> int | None:
+    collection = client.get_collection(settings.QDRANT_COLLECTION)
+    vectors_config = collection.config.params.vectors
+    vector_size = getattr(vectors_config, "size", None)
+    if isinstance(vectors_config, dict):
+        first_vector = next(iter(vectors_config.values()), None)
+        vector_size = getattr(first_vector, "size", None)
+    return int(vector_size) if vector_size else None
+
+
+def init_collection() -> Dict[str, Any]:
     """Create the documents collection if it doesn't exist."""
     try:
         collections = client.get_collections().collections
@@ -34,8 +45,27 @@ def init_collection():
                 ),
             )
             logger.info(f"Created Qdrant collection: {settings.QDRANT_COLLECTION}")
+            return {"created": True, "recreated": False, "vector_size": settings.EMBEDDING_DIM}
         else:
+            vector_size = _vector_size()
+            if vector_size and int(vector_size) != int(settings.EMBEDDING_DIM):
+                logger.warning(
+                    "Qdrant collection dimension mismatch: current=%s expected=%s. Recreating collection; documents will be reindexed after startup.",
+                    vector_size,
+                    settings.EMBEDDING_DIM,
+                )
+                client.recreate_collection(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    vectors_config=VectorParams(size=settings.EMBEDDING_DIM, distance=Distance.COSINE),
+                )
+                return {
+                    "created": False,
+                    "recreated": True,
+                    "previous_vector_size": vector_size,
+                    "vector_size": settings.EMBEDDING_DIM,
+                }
             logger.info(f"Qdrant collection ready: {settings.QDRANT_COLLECTION}")
+            return {"created": False, "recreated": False, "vector_size": vector_size}
     except Exception as e:
         logger.error(f"Failed to init Qdrant: {e}")
         raise
@@ -99,6 +129,30 @@ def search_chunks(query_vector: List[float], top_k: int = 5) -> List[Dict[str, A
         }
         for r in results
     ]
+
+
+def source_counts() -> Dict[str, int]:
+    """Count indexed chunks per source file."""
+    counts: Counter[str] = Counter()
+    offset = None
+
+    while True:
+        points, offset = client.scroll(
+            collection_name=settings.QDRANT_COLLECTION,
+            limit=256,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in points:
+            payload = point.payload or {}
+            counts[payload.get("source", "unknown")] += 1
+        if offset is None:
+            break
+
+    return dict(counts)
+
+
 def delete_by_source(source: str):
     """Delete all chunks for a specific source file."""
     client.delete(

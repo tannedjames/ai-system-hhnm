@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 :root {
+  color-scheme: light;
   --bg: #f9fafb;
   --bg-card: #ffffff;
   --text: #111827;
@@ -10,6 +11,19 @@
   --border: #e5e7eb;
   --primary: #4f46e5;
   --primary-hover: #4338ca;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #020617;
+    --bg-card: #0f172a;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --border: #334155;
+    --primary: #6366f1;
+    --primary-hover: #818cf8;
+  }
 }
 
 * {

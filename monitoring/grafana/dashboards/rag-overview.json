@@ -1,0 +1,32 @@
+{
+  "title": "RAG Overview",
+  "uid": "rag-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Documents Total",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "rag_documents_total"}]
+    },
+    {
+      "type": "stat",
+      "title": "Documents Completed",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "rag_documents_completed"}]
+    },
+    {
+      "type": "stat",
+      "title": "Documents Failed",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "rag_documents_failed"}]
+    },
+    {
+      "type": "stat",
+      "title": "Conversations",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "rag_conversations_total"}]
+    }
+  ]
+}

@@ -1,5 +1,3 @@
-version: '3.8'
-
 # RAG Academic Search - Full Stack
 # 8 services: nginx, frontend-user, frontend-admin, backend, worker, postgres, qdrant, minio, redis
 
@@ -73,6 +71,33 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://chat.trollllm.xyz}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://chat.trollllm.xyz/v1}
+      OPENAI_USER_AGENT: ${OPENAI_USER_AGENT:-rag-system/1.0}
+      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-6}
+      MAX_CONTEXT_CHUNKS: ${MAX_CONTEXT_CHUNKS:-8}
+      MAX_SOURCES_IN_ANSWER: ${MAX_SOURCES_IN_ANSWER:-5}
+      MIN_RELEVANCE_SCORE: ${MIN_RELEVANCE_SCORE:-0.0}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-sentence-transformers}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      EMBEDDING_LOCAL_MODEL: ${EMBEDDING_LOCAL_MODEL:-}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-0}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      CHUNK_SIZE: ${CHUNK_SIZE:-500}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-100}
+      RAG_CHUNK_MIN_CHARS: ${RAG_CHUNK_MIN_CHARS:-120}
+      RAG_DEDUP_CHUNKS: ${RAG_DEDUP_CHUNKS:-true}
+      RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-5}
+      USE_RERANKER: ${USE_RERANKER:-False}
+      OCR_ENABLED: ${OCR_ENABLED:-true}
+      OCR_LANGS: ${OCR_LANGS:-eng+vie}
+      OCR_DPI: ${OCR_DPI:-200}
+      OCR_MIN_TEXT_CHARS: ${OCR_MIN_TEXT_CHARS:-1}
+      PDF_MIN_PAGES_FOR_TEXT_GUARD: ${PDF_MIN_PAGES_FOR_TEXT_GUARD:-8}
+      PDF_EMPTY_PAGE_RATIO_THRESHOLD: ${PDF_EMPTY_PAGE_RATIO_THRESHOLD:-0.7}
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-50}
       DATABASE_URL: postgresql://${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpass}@postgres:5432/${POSTGRES_DB:-rag_db}
       QDRANT_URL: http://qdrant:6333
       MINIO_ENDPOINT: minio:9000
@@ -81,9 +106,22 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-in-production}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-120}
+      ADMIN_DEFAULT_USERNAME: ${ADMIN_DEFAULT_USERNAME:-admin}
+      ADMIN_DEFAULT_PASSWORD: ${ADMIN_DEFAULT_PASSWORD:-admin123}
       ENVIRONMENT: production
     ports:
       - "8000:8000"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,6 +142,23 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://chat.trollllm.xyz}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-sentence-transformers}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      EMBEDDING_LOCAL_MODEL: ${EMBEDDING_LOCAL_MODEL:-}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-0}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      CHUNK_SIZE: ${CHUNK_SIZE:-500}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-100}
+      RAG_CHUNK_MIN_CHARS: ${RAG_CHUNK_MIN_CHARS:-120}
+      RAG_DEDUP_CHUNKS: ${RAG_DEDUP_CHUNKS:-true}
+      OCR_ENABLED: ${OCR_ENABLED:-true}
+      OCR_LANGS: ${OCR_LANGS:-eng+vie}
+      OCR_DPI: ${OCR_DPI:-200}
+      OCR_MIN_TEXT_CHARS: ${OCR_MIN_TEXT_CHARS:-1}
+      PDF_MIN_PAGES_FOR_TEXT_GUARD: ${PDF_MIN_PAGES_FOR_TEXT_GUARD:-8}
+      PDF_EMPTY_PAGE_RATIO_THRESHOLD: ${PDF_EMPTY_PAGE_RATIO_THRESHOLD:-0.7}
       DATABASE_URL: postgresql://${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpass}@postgres:5432/${POSTGRES_DB:-rag_db}
       QDRANT_URL: http://qdrant:6333
       MINIO_ENDPOINT: minio:9000
@@ -112,6 +167,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    command: celery -A worker.tasks.ingest.celery_app worker --loglevel=info --pool=solo --concurrency=1 --prefetch-multiplier=1
     depends_on:
       - postgres
       - minio
@@ -130,7 +188,8 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   frontend-admin:
     build:
@@ -143,7 +202,8 @@ services:
     ports:
       - "3001:3001"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   # ==================== Load Balancer ====================
   nginx:
@@ -155,13 +215,81 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - backend
-      - frontend-user
-      - frontend-admin
+      backend:
+        condition: service_healthy
+      frontend-user:
+        condition: service_started
+      frontend-admin:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: rag-prometheus
+    profiles: ["monitoring"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: rag-grafana
+    profiles: ["monitoring"]
+    ports:
+      - "3002:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin123}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    container_name: rag-redis-exporter
+    profiles: ["monitoring"]
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      - redis
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: rag-postgres-exporter
+    profiles: ["monitoring"]
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpass}@postgres:5432/${POSTGRES_DB:-rag_db}?sslmode=disable
+    depends_on:
+      - postgres
+
+  backup-scheduler:
+    image: alpine:3.20
+    container_name: rag-backup-scheduler
+    profiles: ["backup"]
+    working_dir: /project
+    command: ["/bin/sh", "-c", "apk add --no-cache bash docker-cli && /project/scripts/backup-cron.sh"]
+    environment:
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      POSTGRES_USER: ${POSTGRES_USER:-raguser}
+      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
+    volumes:
+      - ./:/project
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - postgres
+      - qdrant
+      - minio
 
 volumes:
   postgres_data:
   qdrant_data:
   minio_data:
   redis_data:
-
+  grafana_data:
+  hf_cache:

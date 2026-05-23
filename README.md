@@ -8,6 +8,12 @@ Một hệ thống Retrieval-Augmented Generation (RAG) sản phẩm cho phép t
 
 Hệ thống này hỗ trợ sinh viên và giảng viên trả lời các câu hỏi về nội dung khóa học. Người dùng tải lên sách giáo khoa, ghi chú bài giảng, bộ bài tập và tài liệu cương. Hệ thống sau đó trả lời các truy vấn của sinh viên với câu trả lời dựa trên tài liệu này, kèm theo trích dẫn nguồn (tên tài liệu, số trang, điểm liên quan).
 
+**Corpus mẫu:** giáo trình PDF, slide bài giảng, đề cương môn học, bài tập, ghi chú Markdown/TXT/DOCX.
+
+**Câu hỏi demo:** “Decision Tree hoạt động như thế nào?”, “Loss function nào dùng cho logistic regression?”, “Tóm tắt nội dung sau Chapter 8”, “Nguồn nào nói về KNN?”.
+
+**Tiêu chí thành công:** câu trả lời có căn cứ trong tài liệu, hiển thị ≥1 nguồn liên quan, Hit@5/MRR được đo trên 20–30 câu hỏi trong `docs/evaluation_template.csv`.
+
 **Quy trình ví dụ:**
 1. Giảng viên tải lên lịch trình khóa học và các tập PDF bài giảng qua bảng điều khiển quản trị
 2. Hệ thống tự động trích xuất văn bản, chia nhỏ, nhúng và lập chỉ mục
@@ -155,6 +161,23 @@ rag-system/
 
 ---
 
+## Kiến trúc
+
+![Sơ đồ kiến trúc RAG](docs/architecture.drawio.svg)
+
+| Thành phần yêu cầu | Hiện thực trong dự án |
+|---|---|
+| Frontend người dùng | `frontend-user` — chat streaming, nguồn trích dẫn, lịch sử chat cục bộ |
+| Frontend quản trị | `frontend-admin` — upload kéo/thả, quản lý tài liệu, user role/active, RAG settings |
+| Backend | `backend` — FastAPI, auth, RAG answer/search/admin API |
+| Database | PostgreSQL — user, document metadata, conversation history, system config |
+| Object storage | MinIO — lưu file gốc/snapshot tài liệu |
+| Vector database | Qdrant — dense semantic embeddings |
+| Message queue | Redis + Celery — ingest/reindex nền |
+| Load balancer | Nginx — route `/`, `/admin`, `/api`, `/docs` |
+
+---
+
 ## Các dịch vụ và cổng
 
 | Dịch vụ | Cổng | Mục đích |
@@ -175,7 +198,7 @@ rag-system/
 ### Quản trị: Tải lên tài liệu
 
 1. Mở http://localhost/admin
-2. Kéo hoặc nhấp để tải lên tệp PDF/TXT/DOCX/MD (tối đa 100 MB)
+2. Kéo hoặc nhấp để tải lên tệp PDF/TXT/DOCX/MD (tối đa 50 MB)
 3. Theo dõi trạng thái: **đang chờ xử lý** → **đang xử lý** → **hoàn thành**
 4. Sau khi hoàn thành, các phần xuất hiện trong Qdrant và chỉ mục BM25
 5. Xem chi tiết tệp: kích thước, số lượng phần, thời gian tải lên
@@ -237,16 +260,16 @@ Tài liệu API đầy đủ: http://localhost/docs
 - **Framework:** FastAPI (Python 3.11)
 - **LLM:** Claude qua proxy TrollLLM
 - **Pipeline RAG:**
-  - Nhúng: sentence-transformers (cục bộ, không có gọi API)
+  - Nhúng: sentence-transformers semantic embeddings (cục bộ, không dùng hash fallback mặc định)
   - Tìm kiếm mật độ: cơ sở dữ liệu vector Qdrant
   - Tìm kiếm thưa: BM25 (thư viện rank-bm25)
   - Xếp hạng lại: mã hóa chéo (sentence-transformers)
   - Kết hợp: kết hợp xếp hạng tương hỗ (RRF)
 - **Xử lý văn bản:**
-  - PDF: pdfplumber
+  - PDF: pdfplumber + OCR fallback (`pytesseract`) cho trang scan/ảnh
   - DOCX: python-docx
   - TXT/MD: I/O tệp tiêu chuẩn
-  - Chia nhỏ: cửa sổ trượt với lồng
+  - Chia nhỏ: cửa sổ trượt với overlap, lọc chunk nhỏ, merge chunk ngắn liền kề, dedup tùy chọn
 
 ### Cơ sở hạ tầng
 - **Cơ sở dữ liệu:**
@@ -336,6 +359,75 @@ docker compose build
 docker compose up -d
 ```
 
+### Monitoring (Prometheus + Grafana)
+
+```bash
+docker compose --profile monitoring up -d
+```
+
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3002` (`GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`)
+
+### Backup scheduler (tự động)
+
+```bash
+docker compose --profile backup up -d backup-scheduler
+```
+
+- Chu kỳ backup: `BACKUP_INTERVAL_SECONDS` (mặc định `86400` = 24h)
+- Backup thủ công:
+
+```bash
+./scripts/backup_all.sh
+```
+
+### SSL (Let's Encrypt + domain)
+
+1) Trỏ domain về máy chạy Nginx, set `DOMAIN` trong `.env`.
+
+2) Chạy stack SSL:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ssl.yml up -d
+```
+
+`certbot-renewer` sẽ tự renew + reload Nginx (HUP) sau khi cert thay đổi.
+
+3) Cấp cert lần đầu:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ssl.yml run --rm certbot \
+  certonly --webroot -w /var/www/certbot -d $DOMAIN --email you@example.com --agree-tos --no-eff-email
+```
+
+4) Reload Nginx:
+
+```bash
+docker compose restart nginx
+```
+
+### Production profile (internal-only services)
+
+Chạy production với chỉ Nginx publish port ra host:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.prod.yml \
+  -f docker-compose.ssl.yml \
+  --profile monitoring \
+  --profile backup \
+  --profile ssl \
+  up -d
+```
+
+- Các service nội bộ (DB, Redis, backend, frontend app containers) không publish port host.
+- Set CORS allowlist trong `.env`:
+
+```bash
+CORS_ALLOWED_ORIGINS=https://your-domain.com,https://www.your-domain.com
+```
+
 ---
 
 ## Các yêu cầu đã đáp ứng
@@ -352,7 +444,13 @@ docker compose up -d
 **Frontend Quản trị**
 - ✅ Tải lên tài liệu (kéo & thả)
 - ✅ Danh sách tài liệu với theo dõi trạng thái
+- ✅ Chẩn đoán ingest: số trang, số chunk, chunk bị loại, thời gian xử lý, lỗi
+- ✅ Chẩn đoán PDF: trang rỗng/ít text, trang dùng OCR
 - ✅ Xóa tài liệu
+- ✅ Tái index từng tài liệu hoặc toàn bộ kho tri thức
+- ✅ Quản lý quyền người dùng (`admin` / `user`) và trạng thái active
+- ✅ Cấu hình RAG: chunking, retrieval, reranker, embedding metadata
+- ✅ Re-embedding policy: đổi chunk/embedding/OCR setting → bấm **Reindex all** để queue lại toàn bộ kho tri thức
 - ✅ Hình dung trạng thái ingest
 - ✅ Bảng điều khiển thống kê
 
@@ -406,10 +504,12 @@ docker compose up -d
   - ✅ Hướng dẫn khắc phục sự cố
 - ✅ Mẫu `.env.example` (không có bí mật trong git)
 - ✅ Tài liệu phụ thuộc (requirements.txt, package.json)
+- ✅ Mẫu đánh giá RAG: `docs/evaluation.md`, `docs/evaluation_template.csv`
 
 ### Các tính năng bổ sung được triển khai
 - ✅ **Pipeline RAG nâng cao:** BM25 + RRF + xếp hạng lại mã hóa chéo
 - ✅ **Hiệu quả hệ thống:** Docker Compose, Celery, Redis caching
+- ✅ **Đánh giá chất lượng:** template Hit@k, MRR, citation relevance
 
 ---
 

@@ -13,12 +13,28 @@ Pipeline (matches the assignment diagram):
         cross-encoder rerank           → final top-k
 """
 import logging
+import re
 from typing import List, Dict, Any, Optional
+
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Lazy-loaded cross-encoder
 _reranker = None
+_stopwords = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how",
+    "in", "is", "it", "of", "on", "or", "that", "the", "to", "was", "were",
+    "what", "when", "where", "which", "with", "about", "after", "before",
+    "tell", "me", "compare", "chapter",
+}
+
+def _tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"\w+", (text or "").lower())
+        if len(token) > 2 and token not in _stopwords
+    }
 
 
 def _chunk_key(c: Dict[str, Any]) -> str:
@@ -114,13 +130,37 @@ def rerank(
     reranked = sorted(chunks, key=lambda c: c["rerank_score"], reverse=True)
     return reranked[:top_k]
 
+def lexical_rerank(query: str, chunks: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+    """Cheap fallback reranker for demos when the cross-encoder is disabled."""
+    query_tokens = _tokens(query)
+    if not query_tokens:
+        return chunks[:top_k]
+
+    query_text = (query or "").lower()
+    ranked = []
+    for index, chunk in enumerate(chunks):
+        text = (chunk.get("text") or "").lower()
+        chunk_tokens = _tokens(text)
+        overlap = len(query_tokens & chunk_tokens)
+        coverage = overlap / max(1, len(query_tokens))
+        phrase_bonus = 0.25 if query_text and query_text in text else 0.0
+        lexical_score = coverage + phrase_bonus
+        score = lexical_score + float(chunk.get("rrf_score", chunk.get("score", 0.0)))
+        enriched = dict(chunk)
+        enriched["lexical_score"] = round(lexical_score, 6)
+        enriched["score"] = score
+        ranked.append((score, -index, enriched))
+
+    ranked.sort(reverse=True)
+    return [chunk for _score, _index, chunk in ranked[:top_k]]
+
 
 def hybrid_search(
     query: str,
     query_vector: List[float],
     top_k: int = 5,
     candidate_k: int = 10,
-    use_rerank: bool = True,
+    use_rerank: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     """
     Full hybrid retrieval.
@@ -139,6 +179,8 @@ def hybrid_search(
     # Import here to avoid circular imports at module load
     from backend.storage import qdrant_client as qdrant
     from backend.bm25_search import search_bm25
+
+    candidate_k = max(candidate_k, top_k * 6, settings.RETRIEVAL_TOP_K * 6)
 
     # 1. Dense (semantic) search
     try:
@@ -160,15 +202,18 @@ def hybrid_search(
     # 3. RRF fusion
     fused = reciprocal_rank_fusion(dense, sparse)
 
+    if use_rerank is None:
+        use_rerank = settings.USE_RERANKER
+
     # 4. Cross-encoder rerank (optional)
     if use_rerank:
         final = rerank(query, fused, top_k=top_k)
     else:
-        final = fused[:top_k]
+        final = lexical_rerank(query, fused, top_k=top_k)
 
     # Normalize a "score" field for the API response
     
     for c in final:
-       c["score"] = c.get("rerank_score_norm", c.get("rrf_score", 0.0))
+        c["score"] = c.get("rerank_score_norm", c.get("score", c.get("rrf_score", 0.0)))
 
     return final
