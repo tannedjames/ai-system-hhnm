@@ -25,8 +25,7 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str
     ANTHROPIC_BASE_URL: str = "https://chat.trollllm.xyz"
     CLAUDE_MODEL: str = "claude-sonnet-4-6"
-    # Bigger budget so synthesis answers ("summarize all the docs") are not truncated.
-    CLAUDE_MAX_TOKENS: int = 4000
+    CLAUDE_MAX_TOKENS: int = 2000
 
     # PostgreSQL
     DATABASE_URL: str = "postgresql://raguser:ragpass@localhost:5432/rag_db"
@@ -52,10 +51,7 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 384  # MiniLM produces 384-dim vectors
     CHUNK_SIZE: int = 500
     CHUNK_OVERLAP: int = 100
-    # Default number of chunks returned by retrieval. Increased from 5 -> 8 because
-    # 5 was systematically too narrow for broad/synthesis questions. hybrid_search
-    # will widen this further when it detects a synthesis-style question.
-    RETRIEVAL_TOP_K: int = 8
+    RETRIEVAL_TOP_K: int = 5
 
     # Uploads
     MAX_UPLOAD_SIZE_MB: int = 100

@@ -1,24 +1,19 @@
 """BM25 sparse keyword search.
 
 BM25 is a bag-of-words ranking function (the classic search-engine algorithm).
-It complements dense vector search: dense search captures meaning, BM25
-captures exact keyword overlap. Combining both (see hybrid_search.py) gives
-better retrieval than either alone.
+It complements dense vector search: dense search captures *meaning*, BM25
+captures *exact keyword overlap*. Combining both (see hybrid.py) gives better
+retrieval than either alone.
 
 Design note: BM25 needs an in-memory index of every chunk. Because the backend
 and worker run in separate containers, we don't try to share the index. Instead
-we lazily (re)build it from whatever is currently stored in Qdrant, and cache
-it in-process. The cache is invalidated whenever documents change.
-
-The freshness check uses a *signature* (count + hash of source identities),
-not just a chunk count - otherwise deleting N chunks and adding N different
-chunks would leave a stale index in memory.
+we lazily (re)build it from whatever is currently stored in Qdrant, and cache it
+in-process. The cache is invalidated whenever documents change.
 """
-import hashlib
 import logging
 import re
 import threading
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 from rank_bm25 import BM25Okapi
 
@@ -30,11 +25,11 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _bm25: Optional[BM25Okapi] = None
 _corpus_chunks: List[Dict[str, Any]] = []
-_index_signature: Optional[Tuple[int, str]] = None  # (count, sources_hash)
+_index_size: int = -1
 
 
 def _tokenize(text: str) -> List[str]:
-    """Lowercase + split on non-alphanumeric. Works for EN, VN (Unicode \\w by default)."""
+    """Lowercase + split on non-alphanumeric. Good enough for academic text."""
     return re.findall(r"\w+", (text or "").lower())
 
 
@@ -57,7 +52,6 @@ def _fetch_all_chunks() -> List[Dict[str, Any]]:
                 "text": payload.get("text", ""),
                 "source": payload.get("source", "unknown"),
                 "page": payload.get("page", 0),
-                "page_end": payload.get("page_end", payload.get("page", 0)),
                 "chunk_index": payload.get("chunk_index", 0),
             })
         if offset is None:
@@ -68,19 +62,19 @@ def _fetch_all_chunks() -> List[Dict[str, Any]]:
 
 def invalidate_cache():
     """Call after documents are added/removed so the index rebuilds."""
-    global _bm25, _corpus_chunks, _index_signature
+    global _bm25, _corpus_chunks, _index_size
     with _lock:
         _bm25 = None
         _corpus_chunks = []
-        _index_signature = None
+        _index_size = -1
     logger.info("BM25 cache invalidated")
 
 
-def _current_signature() -> Optional[Tuple[int, str]]:
-    """Cheap signature of the current corpus: (count, hash of (source, chunk_index)).
+def _ensure_index():
+    """Build the BM25 index if it's missing or stale."""
+    global _bm25, _corpus_chunks, _index_size
 
-    Survives the same-count churn that the old count-only check missed.
-    """
+    # Quick check: how many chunks does Qdrant have right now?
     try:
         count = qdrant.client.count(
             collection_name=qdrant.settings.QDRANT_COLLECTION,
@@ -88,39 +82,10 @@ def _current_signature() -> Optional[Tuple[int, str]]:
         ).count
     except Exception as e:
         logger.warning(f"Could not count Qdrant points: {e}")
-        return None
-
-    h = hashlib.md5()
-    offset = None
-    try:
-        while True:
-            points, offset = qdrant.client.scroll(
-                collection_name=qdrant.settings.QDRANT_COLLECTION,
-                limit=512,
-                offset=offset,
-                with_payload=["source", "chunk_index"],
-                with_vectors=False,
-            )
-            for p in points:
-                payload = p.payload or {}
-                h.update(f"{payload.get('source', '')}::{payload.get('chunk_index', '')}\n".encode("utf-8"))
-            if offset is None:
-                break
-    except Exception as e:
-        logger.warning(f"Signature scan failed (will rebuild defensively): {e}")
-        return (count, "scan-failed")
-
-    return (count, h.hexdigest())
-
-
-def _ensure_index():
-    """Build the BM25 index if it's missing or stale."""
-    global _bm25, _corpus_chunks, _index_signature
-
-    sig = _current_signature()
+        count = -1
 
     with _lock:
-        if _bm25 is not None and sig is not None and sig == _index_signature:
+        if _bm25 is not None and count == _index_size:
             return  # Cache is fresh
 
         logger.info("Building BM25 index from Qdrant...")
@@ -129,21 +94,23 @@ def _ensure_index():
         if not chunks:
             _bm25 = None
             _corpus_chunks = []
-            _index_signature = (0, "empty")
+            _index_size = 0
             logger.info("BM25 index empty (no chunks)")
             return
 
         tokenized = [_tokenize(c["text"]) for c in chunks]
         _bm25 = BM25Okapi(tokenized)
         _corpus_chunks = chunks
-        _index_signature = sig if sig is not None else (len(chunks), "no-sig")
+        _index_size = count if count >= 0 else len(chunks)
         logger.info(f"BM25 index built: {len(chunks)} chunks")
 
 
 def search_bm25(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-    """Keyword search over all indexed chunks.
+    """
+    Keyword search over all indexed chunks.
 
-    Returns list of dicts: text, source, page, page_end, chunk_index, score
+    Returns list of dicts: text, source, page, chunk_index, score
+    (score is the raw BM25 score; higher = better.)
     """
     _ensure_index()
 
@@ -156,6 +123,7 @@ def search_bm25(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
 
     scores = _bm25.get_scores(tokens)
 
+    # Top-k by score
     ranked = sorted(
         range(len(scores)),
         key=lambda i: scores[i],
@@ -171,7 +139,6 @@ def search_bm25(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
             "text": chunk["text"],
             "source": chunk["source"],
             "page": chunk["page"],
-            "page_end": chunk.get("page_end", chunk["page"]),
             "chunk_index": chunk["chunk_index"],
             "score": float(scores[i]),
         })

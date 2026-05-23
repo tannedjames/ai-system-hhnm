@@ -20,8 +20,7 @@ client = QdrantClient(url=settings.QDRANT_URL)
 
 
 def init_collection():
-    """Create the documents collection if it doesn't exist, plus a payload index
-    on `source` so delete-by-source / filter-by-source queries are fast."""
+    """Create the documents collection if it doesn't exist."""
     try:
         collections = client.get_collections().collections
         names = [c.name for c in collections]
@@ -37,42 +36,39 @@ def init_collection():
             logger.info(f"Created Qdrant collection: {settings.QDRANT_COLLECTION}")
         else:
             logger.info(f"Qdrant collection ready: {settings.QDRANT_COLLECTION}")
-
-        # Ensure the `source` field is indexed - speeds up delete-by-source and
-        # any future filtered searches. Safe to call repeatedly.
-        try:
-            client.create_payload_index(
-                collection_name=settings.QDRANT_COLLECTION,
-                field_name="source",
-                field_schema="keyword",
-            )
-        except Exception as e:
-            # Already-exists errors are fine
-            logger.debug(f"Payload index on 'source' not created (likely already exists): {e}")
     except Exception as e:
         logger.error(f"Failed to init Qdrant: {e}")
         raise
 
 
 def upsert_chunks(chunks: List[Dict[str, Any]], vectors: List[List[float]]):
-    """Save chunks with their embeddings to Qdrant.
-
-    Each point gets a deterministic UUID derived from (source, chunk_index),
-    so re-ingesting the same chunk overwrites the previous version instead of
-    accumulating duplicates.
     """
-    import uuid
+    Save chunks with their embeddings to Qdrant.
 
+    Args:
+        chunks: List of dicts with keys: text, source, page, chunk_index
+        vectors: List of embedding vectors (one per chunk)
+    """
     if len(chunks) != len(vectors):
         raise ValueError("chunks and vectors must have same length")
 
-    points = []
-    for chunk, vector in zip(chunks, vectors):
-        point_id = str(uuid.uuid5(
+    points = [
+        PointStruct(
+            id=i,  # Will be replaced with proper IDs in caller
+            vector=vector,
+            payload=chunk,
+        )
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors))
+    ]
+
+    # Use UUIDs or hashes for IDs to avoid collisions
+    import uuid
+    for point, chunk in zip(points, chunks):
+        # Deterministic ID: hash of source + chunk_index
+        point.id = str(uuid.uuid5(
             uuid.NAMESPACE_DNS,
-            f"{chunk['source']}_{chunk['chunk_index']}",
+            f"{chunk['source']}_{chunk['chunk_index']}"
         ))
-        points.append(PointStruct(id=point_id, vector=vector, payload=chunk))
 
     client.upsert(
         collection_name=settings.QDRANT_COLLECTION,
@@ -80,12 +76,12 @@ def upsert_chunks(chunks: List[Dict[str, Any]], vectors: List[List[float]]):
     )
     logger.info(f"Upserted {len(points)} vectors to Qdrant")
 
-
 def search_chunks(query_vector: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
-    """Find the most similar chunks to the query vector.
+    """
+    Find the most similar chunks to the query vector.
 
     Returns:
-        List of dicts with keys: text, source, page, page_end, chunk_index, score
+        List of dicts with keys: text, source, page, chunk_index, score
     """
     results = client.query_points(
         collection_name=settings.QDRANT_COLLECTION,
@@ -98,73 +94,11 @@ def search_chunks(query_vector: List[float], top_k: int = 5) -> List[Dict[str, A
             "text": r.payload.get("text", ""),
             "source": r.payload.get("source", "unknown"),
             "page": r.payload.get("page", 0),
-            "page_end": r.payload.get("page_end", r.payload.get("page", 0)),
             "chunk_index": r.payload.get("chunk_index", 0),
             "score": float(r.score),
         }
         for r in results
     ]
-
-
-def search_by_source(
-    query_vector: List[float],
-    source: str,
-    top_k: int = 3,
-) -> List[Dict[str, Any]]:
-    """Dense search constrained to a single source document.
-
-    Used by broad-question retrieval to guarantee every document contributes
-    chunks to the rerank pool, even when statistically dominated by larger docs.
-    Cheap because the `source` payload field is indexed.
-    """
-    results = client.query_points(
-        collection_name=settings.QDRANT_COLLECTION,
-        query=query_vector,
-        limit=top_k,
-        query_filter=Filter(
-            must=[FieldCondition(key="source", match=MatchValue(value=source))]
-        ),
-    ).points
-
-    return [
-        {
-            "text": r.payload.get("text", ""),
-            "source": r.payload.get("source", "unknown"),
-            "page": r.payload.get("page", 0),
-            "page_end": r.payload.get("page_end", r.payload.get("page", 0)),
-            "chunk_index": r.payload.get("chunk_index", 0),
-            "score": float(r.score),
-        }
-        for r in results
-    ]
-
-
-def list_unique_sources() -> List[str]:
-    """Return every distinct `source` value currently in the collection.
-
-    Used to know which documents exist in the corpus so broad queries can
-    guarantee at least one chunk per document. Scrolls the payload-only view,
-    so it's cheap even on larger collections.
-    """
-    seen = set()
-    offset = None
-    while True:
-        points, offset = client.scroll(
-            collection_name=settings.QDRANT_COLLECTION,
-            limit=512,
-            offset=offset,
-            with_payload=["source"],
-            with_vectors=False,
-        )
-        for p in points:
-            src = (p.payload or {}).get("source")
-            if src:
-                seen.add(src)
-        if offset is None:
-            break
-    return sorted(seen)
-
-
 def delete_by_source(source: str):
     """Delete all chunks for a specific source file."""
     client.delete(

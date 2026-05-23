@@ -1,3 +1,5 @@
+version: '3.8'
+
 # RAG Academic Search - Full Stack
 # 8 services: nginx, frontend-user, frontend-admin, backend, worker, postgres, qdrant, minio, redis
 
