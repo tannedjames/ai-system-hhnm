@@ -72,72 +72,105 @@ Tất cả 8 container phải hiện `running` hoặc `healthy`.
 
 ## Kiến Trúc
 
-```
-                    ┌─────────────────────┐
-                    │   Nginx (cổng 80)   │
-                    │   Reverse proxy     │
-                    └────┬────┬────┬──────┘
-                         │    │    │
-            ┌────────────┘    │    └──────────────┐
-            │                 │                    │
-  ┌─────────▼────────┐   ┌────▼──────────┐  ┌────▼─────────┐
-  │  Frontend User   │   │   Frontend    │  │   Backend    │
-  │  (cổng 3000)     │   │    Admin      │  │  (cổng 8000) │
-  │  Next.js         │   │  (cổng 3001)  │  │   FastAPI    │
-  │  Chat + Upload   │   │  Next.js      │  │   Logic RAG  │
-  │  + trích dẫn     │   │  Upload & QL  │  │              │
-  └──────────────────┘   └───────────────┘  └────┬─────────┘
-                                                  │
-  ┌──────────────────────────────────────────────┼──────────────────┐
-  │                                              │                  │
-┌─▼──────────┐  ┌──────────┐  ┌─────────────┐  ┌─▼──────┐  ┌────────▼─┐
-│ PostgreSQL │  │ Qdrant   │  │   MinIO     │  │ Redis  │  │  Worker  │
-│ (cổng 5432)│  │ (6333)   │  │ (cổng 9000) │  │ (6379) │  │ (Celery) │
-│            │  │          │  │             │  │        │  │          │
-│ Metadata   │  │ Vector   │  │ File gốc    │  │ Queue  │  │ Extract  │
-│ Lịch sử    │  │ Chunks   │  │             │  │ + cache│  │ Chunk    │
-└────────────┘  └──────────┘  └─────────────┘  └────────┘  │ Embed    │
-                                                            └──────────┘
-```
+## 🏗️ System Architecture
 
-### Luồng Pipeline
+```mermaid
+flowchart TD
+    User([👤 User]) -->|HTTP Request| NGINX
+    Admin([🛠️ Admin]) -->|HTTP Request| NGINX
 
-**Ingest (chạy nền, qua Celery worker)**
-```
-Admin hoặc người dùng upload file
-    ↓
-Backend lưu vào MinIO + tạo hàng PostgreSQL
-    ↓
-Task Celery vào hàng đợi (Redis)
-    ↓
-Worker: trích văn bản → chia chunk theo câu → embed → upsert Qdrant
-    ↓
-Trạng thái: pending → processing → completed
-```
+    NGINX["🔀 Nginx\nLoad Balancer / Reverse Proxy"]
 
-**Query (thời gian thực)**
-```
-Người dùng đặt câu hỏi
-    ↓
-Backend embed câu hỏi (multilingual MiniLM)
-    ↓
-Truy xuất lai (song song):
-    ├─ Dense search (Qdrant — vector similarity)
-    └─ Sparse search (BM25 — từ khóa)
-    ↓
-RRF fusion (Reciprocal Rank Fusion)
-    ↓
-Rerank bằng cross-encoder (đa ngôn ngữ)
-    ↓
-Nếu là câu hỏi tổng hợp/khái quát:
-    → mở rộng top_k, candidate pool lớn hơn, đa dạng hóa theo nguồn
-    ↓
-Gửi chunks + câu hỏi tới Claude (qua proxy TrollLLM)
-    ↓
-Câu trả lời + trích dẫn nguồn → frontend
+    NGINX --> FE_USER["🖥️ Frontend User\nNext.js\n─────────────\n• Chat / Q&A UI\n• Streaming response\n• Source viewer"]
+    NGINX --> FE_ADMIN["🖥️ Frontend Admin\nNext.js\n─────────────\n• Document Manager\n• User Management\n• Re-index / Ingest"]
+    NGINX --> BACKEND
+
+    FE_USER -->|REST API| BACKEND
+    FE_ADMIN -->|REST API| BACKEND
+
+    BACKEND["⚙️ FastAPI Backend\n─────────────────────\n• POST /api/query\n• POST /api/documents\n• GET  /api/users\n• POST /api/ingest"]
+
+    BACKEND -->|Async Tasks| WORKER["🔧 Celery Worker\n──────────────\n• Chunking\n• Embedding\n• Indexing"]
+    BACKEND -->|Search Query| HYBRID
+
+    subgraph HYBRID["🔍 Hybrid Search Engine"]
+        BM25["📝 BM25\nSparse Search"]
+        DENSE["🧠 Qdrant\nDense ANN Search"]
+        RRF["⚖️ RRF Fusion\nReciprocal Rank Fusion"]
+        BM25 --> RRF
+        DENSE --> RRF
+    end
+
+    RRF -->|Top-K Chunks + Context| CLAUDE["🤖 Anthropic Claude API\nclaude-sonnet-4-*\n────────────────────\nAnswer Generation\n(Streaming)"]
+
+    WORKER --> STORAGE
+    BACKEND --> STORAGE
+
+    subgraph STORAGE["🗄️ Storage Layer"]
+        PG["🐘 PostgreSQL\n──────────\nDocs / Chunks\nUsers / Sessions"]
+        MINIO["🪣 MinIO\nS3-Compatible\n──────────\nRaw Files\nSnapshots"]
+        QDRANT["📐 Qdrant\n──────────\nVectors\nPayloads"]
+        REDIS["⚡ Redis\n──────────\nTask Broker\nCache"]
+    end
+
+    CLAUDE -->|Streamed Answer| FE_USER
+
+    style NGINX fill:#f0a500,color:#000
+    style BACKEND fill:#2563eb,color:#fff
+    style WORKER fill:#7c3aed,color:#fff
+    style CLAUDE fill:#059669,color:#fff
+    style STORAGE fill:#1e293b,color:#fff
+    style HYBRID fill:#1e293b,color:#fff
 ```
 
 ---
+
+## 🔄 RAG Pipeline Flow
+
+```mermaid
+flowchart TD
+    Q([👤 User Query]) --> QP
+
+    QP["⚙️ 1. Query Processing\n──────────────────────────\n• BM25 tokenization\n• Multilingual embedding\n  paraphrase-multilingual-mpnet-base-v2"]
+
+    QP -->|Tokenized query| BM25
+    QP -->|Dense vector| QDRANT
+
+    BM25["📝 BM25 Sparse Search\n──────────────────\nTF-IDF keyword match\nExact term scoring"]
+    QDRANT["🧠 Qdrant Dense Search\n──────────────────\nANN cosine similarity\nSemantic understanding"]
+
+    BM25 -->|Ranked doc list| RRF
+    QDRANT -->|Ranked doc list| RRF
+
+    RRF["⚖️ 2. Hybrid Fusion\n──────────────────────────\nReciprocal Rank Fusion\nscore = Σ 1 ÷ (k + rankᵢ)"]
+
+    RRF --> CTX
+
+    CTX["📄 3. Context Assembly\n──────────────────────────\n• Top-K ranked chunks\n• Source metadata\n• Page / document refs"]
+
+    CTX --> PROMPT
+
+    PROMPT["📝 Prompt Construction\n──────────────────────────\nSystem prompt +\nRetrieved context +\nUser query"]
+
+    PROMPT --> CLAUDE
+
+    CLAUDE["🤖 4. Answer Generation\nAnthropic Claude API\n──────────────────────────\nStreaming response\n+ cited sources"]
+
+    CLAUDE --> OUT([💬 Final Answer\n+ Source Citations])
+
+    style Q fill:#0ea5e9,color:#fff
+    style QP fill:#6366f1,color:#fff
+    style BM25 fill:#f59e0b,color:#000
+    style QDRANT fill:#f59e0b,color:#000
+    style RRF fill:#8b5cf6,color:#fff
+    style CTX fill:#10b981,color:#fff
+    style PROMPT fill:#10b981,color:#fff
+    style CLAUDE fill:#059669,color:#fff
+    style OUT fill:#0ea5e9,color:#fff
+```
+
+---
+
 
 ## Cấu Trúc Repo
 
